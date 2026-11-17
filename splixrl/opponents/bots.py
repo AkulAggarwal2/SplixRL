@@ -9,6 +9,29 @@ from ..game import N_ACTIONS, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
 from .base import Opponent, bfs_first_action, safe_actions
 
 
+def _manhattan_core(n, heads):
+    out = np.empty((n, n), dtype=np.int64)
+    for r in range(n):
+        for c in range(n):
+            best = 1 << 30
+            for k in range(heads.shape[0]):
+                d = abs(r - heads[k, 0]) + abs(c - heads[k, 1])
+                if d < best:
+                    best = d
+            out[r, c] = best
+    return out
+
+
+try:
+    from numba import njit
+
+    _manhattan_to_nearest = njit(cache=True)(_manhattan_core)
+except ImportError:  # pragma: no cover
+    def _manhattan_to_nearest(n, heads):
+        rr, cc = np.mgrid[0:n, 0:n]
+        return np.min([np.abs(rr - r) + np.abs(cc - c) for r, c in heads], axis=0)
+
+
 class RandomBot(Opponent):
     """Uniformly random actions. With ``safe=True`` it never drives into a
     wall or its own trail when it has another choice."""
@@ -82,13 +105,22 @@ class LoopBot(Opponent):
         return [STRAIGHT, *rest]
 
     def _enemy_dist(self, game: SplixGame, pid: int) -> np.ndarray:
-        """Manhattan distance from every cell to the nearest enemy head (large if none)."""
+        """Manhattan distance from every cell to the nearest enemy head (large if none).
+        Cached per step and seat: several bot rules ask for it on the same step."""
+        cache = getattr(game, "_step_cache", None)
+        if cache is None or cache.get("t") != game.t:
+            cache = game._step_cache = {"t": game.t}
+        key = ("enemy_dist", pid)
+        if key not in cache:
+            cache[key] = self._enemy_dist_uncached(game, pid)
+        return cache[key]
+
+    def _enemy_dist_uncached(self, game: SplixGame, pid: int) -> np.ndarray:
         n = game.size
-        heads = [q.pos for q in game.players if q.alive and q.pid != pid]
-        if not heads:
+        heads = np.array([q.pos for q in game.players if q.alive and q.pid != pid], dtype=np.int64).reshape(-1, 2)
+        if not len(heads):
             return np.full((n, n), 10 * n)
-        rr, cc = np.mgrid[0:n, 0:n]
-        return np.min([np.abs(rr - r) + np.abs(cc - c) for r, c in heads], axis=0)
+        return _manhattan_to_nearest(n, heads)
 
     def _route(self, game: SplixGame, pid: int, goal: np.ndarray, blocked: np.ndarray, near: np.ndarray) -> int | None:
         """BFS that avoids cells near enemy heads (outside own land), falling back to any path."""

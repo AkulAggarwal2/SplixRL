@@ -196,6 +196,16 @@ This is the first agent trained with roughly what a player has on the real serve
 * **Evaluation** is fixed at 48×48, 6 opponents, 5% lag, and `best.pt` is chosen by evaluation return (real-score units).
 * `--init-from` can warm-start a stage from an earlier checkpoint with the same inputs.
 
+### Speed
+
+On the full real-game setup (random 24–72 boards, up to 10 bots, all observation options), training went from ~27 to ~300–420 steps/s on an M4:
+* **Spawning:** the crowd is capped by board capacity instead of retrying random placements (env 35 → 712 steps/s).
+* **League copies:** drawn per seat with `--league-prob` (default 15%) rather than added to the pool, since every frozen agent builds a full observation each step.
+* **Bots:** BFS and distance grids are compiled with numba and cached per step (BFS was ~40% of env time).
+* **Observations:** cheap-land search cropped to the view range; no per-float `np.clip`.
+* **`--planning-updates 0` for the real-game agent:** the world model never got accurate enough to pass its gate, but it was still trained every 4 steps.
+* **`--num-envs N`:** N games in worker processes (one replay buffer per game, so n-step returns don't mix), batches joined on the CPU and moved to the GPU once.
+
 ## Real game
 
 Trained agents (and our bots) can play on the official, open-source Splix server

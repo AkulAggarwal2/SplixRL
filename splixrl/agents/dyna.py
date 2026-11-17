@@ -210,6 +210,15 @@ def align(grid: torch.Tensor, action: torch.Tensor, cfg) -> torch.Tensor:
 
 
 # ---------------------------------------------------------------- buffers
+def to_torch(arrays, device) -> tuple[torch.Tensor, ...]:
+    """numpy batch -> tensors on the device; actions (int64) stay integers.
+    One transfer per tensor: on a GPU each transfer has a fixed cost."""
+    return tuple(
+        torch.as_tensor(a, dtype=torch.int64 if a.dtype == np.int64 else torch.float32).to(device, non_blocking=True)
+        for a in arrays
+    )
+
+
 class ReplayBuffer:
     def __init__(self, capacity: int, grid_shape, n_vec: int, seed: int = 0):
         self.capacity = capacity
@@ -246,20 +255,18 @@ class ReplayBuffer:
         self.ptr = int((self.ptr + n) % self.capacity)
         self.size = min(self.size + n, self.capacity)
 
-    def sample(self, n: int, device) -> tuple[torch.Tensor, ...]:
+    def sample_np(self, n: int) -> tuple[np.ndarray, ...]:
         idx = self.rng.integers(0, self.size, size=n)
-        t = lambda a, dt=torch.float32: torch.as_tensor(a[idx], dtype=dt, device=device)  # noqa: E731
-        return (
-            t(self.grid),
-            t(self.vec),
-            t(self.action, torch.int64),
-            t(self.reward),
-            t(self.next_grid),
-            t(self.next_vec),
-            t(self.done),
-        )
+        return (self.grid[idx], self.vec[idx], self.action[idx], self.reward[idx],
+                self.next_grid[idx], self.next_vec[idx], self.done[idx])
+
+    def sample(self, n: int, device) -> tuple[torch.Tensor, ...]:
+        return to_torch(self.sample_np(n), device)
 
     def sample_nstep(self, n: int, steps: int, gamma: float, device) -> tuple[torch.Tensor, ...]:
+        return to_torch(self.sample_nstep_np(n, steps, gamma), device)
+
+    def sample_nstep_np(self, n: int, steps: int, gamma: float) -> tuple[np.ndarray, ...]:
         """Batch of n-step transitions built from consecutive single steps.
 
         Requires transitions added in order from one environment. Returns the
@@ -280,24 +287,51 @@ class ReplayBuffer:
             last = np.where(open_, idx, last)
             disc = np.where(open_, disc * gamma, disc)
             open_ &= ~self.end[idx]
-        t = lambda a, dt=torch.float32: torch.as_tensor(a, dtype=dt, device=device)  # noqa: E731
-        return (
-            t(self.grid[start]),
-            t(self.vec[start]),
-            t(self.action[start], torch.int64),
-            t(ret),
-            t(self.next_grid[last]),
-            t(self.next_vec[last]),
-            t(self.done[last]),
-            t(disc),
-        )
+        return (self.grid[start], self.vec[start], self.action[start], ret,
+                self.next_grid[last], self.next_vec[last], self.done[last], disc)
+
+    def sample_states_np(self, n: int) -> tuple[np.ndarray, np.ndarray]:
+        idx = self.rng.integers(0, self.size, size=n)
+        return self.grid[idx], self.vec[idx]
 
     def sample_states(self, n: int, device) -> tuple[torch.Tensor, torch.Tensor]:
-        idx = self.rng.integers(0, self.size, size=n)
-        return (
-            torch.as_tensor(self.grid[idx], dtype=torch.float32, device=device),
-            torch.as_tensor(self.vec[idx], dtype=torch.float32, device=device),
-        )
+        return to_torch(self.sample_states_np(n), device)
+
+
+class MultiBuffer:
+    """One ReplayBuffer per parallel game, sampled as one. Keeps each game's
+    steps contiguous, so n-step returns stay within a game."""
+
+    def __init__(self, n: int, capacity: int, grid_shape, n_vec: int, seed: int = 0):
+        self.bufs = [ReplayBuffer(max(1000, capacity // n), grid_shape, n_vec, seed=seed + i) for i in range(n)]
+        self.rng = np.random.default_rng(seed + 991)
+
+    @property
+    def size(self) -> int:
+        return sum(b.size for b in self.bufs)
+
+    def add(self, *args, **kw) -> None:  # single-game use
+        self.bufs[0].add(*args, **kw)
+
+    def _split(self, n: int, min_size: int = 1) -> list[int]:
+        sizes = np.array([b.size if b.size >= min_size else 0 for b in self.bufs], dtype=float)
+        if sizes.sum() == 0:
+            raise ValueError("replay buffer is empty")
+        return self.rng.multinomial(n, sizes / sizes.sum()).tolist()
+
+    @staticmethod
+    def _cat(parts, device):
+        # join on the CPU, then move once
+        return to_torch(tuple(np.concatenate(xs, 0) for xs in zip(*parts)), device)
+
+    def sample(self, n: int, device):
+        return self._cat([b.sample_np(k) for b, k in zip(self.bufs, self._split(n)) if k], device)
+
+    def sample_nstep(self, n: int, steps: int, gamma: float, device):
+        return self._cat([b.sample_nstep_np(k, steps, gamma) for b, k in zip(self.bufs, self._split(n, steps)) if k], device)
+
+    def sample_states(self, n: int, device):
+        return self._cat([b.sample_states_np(k) for b, k in zip(self.bufs, self._split(n)) if k], device)
 
 
 # ---------------------------------------------------------------- agent
@@ -352,6 +386,16 @@ class DynaAgent(Agent):
             return int(self.rng.integers(self.cfg.n_actions))
         grid, vec = obs_to_torch(obs, "cpu")
         return int(self.q_actor(grid, vec).argmax(1).item())
+
+    @torch.no_grad()
+    def act_batch(self, obs: dict, epsilon: float = 0.0) -> np.ndarray:
+        """Epsilon-greedy actions for a batch of observations (leading dim)."""
+        grid = torch.as_tensor(obs["grid"], dtype=torch.float32)
+        vec = torch.as_tensor(obs["vec"], dtype=torch.float32)
+        actions = self.q_actor(grid, vec).argmax(1).numpy()
+        explore = self.rng.random(len(actions)) < epsilon
+        actions[explore] = self.rng.integers(self.cfg.n_actions, size=int(explore.sum()))
+        return actions
 
     # -- learning --------------------------------------------------------------
     def q_update(self, batch) -> float:

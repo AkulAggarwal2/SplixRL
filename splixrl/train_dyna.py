@@ -15,14 +15,16 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import time
 from pathlib import Path
 
+import gymnasium as gym
 import numpy as np
 import torch
 
-from .agents.dyna import DynaAgent, DynaConfig, ReplayBuffer, pick_device
+from .agents.dyna import DynaAgent, DynaConfig, MultiBuffer, ReplayBuffer, pick_device
 from .env import SplixEnv
 from .evaluation import CsvLogger, TrainingEvaluator
 from .opponents import DEFAULT_POOL, opponent_label
@@ -56,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--steps", type=int, default=200_000, help="real environment steps")
     p.add_argument("--device", default="auto", help="auto = cuda, else mps (Apple GPU), else cpu")
+    p.add_argument("--num-envs", type=int, default=1, help="games played at once in worker processes")
     # env
     p.add_argument("--size", type=int, default=20)
     p.add_argument("--max-steps", type=int, default=500)
@@ -214,7 +217,7 @@ def train(args: argparse.Namespace) -> Path:
             notes += load_extended(agent.model, ck["model"], exact_only=True)
         agent.sync_actor()
         print(f"initialised from {args.init_from}" + (f" ({'; '.join(notes)})" if notes else ""), flush=True)
-    real = ReplayBuffer(cfg.buffer_size, grid_shape, n_vec, seed=args.seed)
+    real = MultiBuffer(max(1, args.num_envs), cfg.buffer_size, grid_shape, n_vec, seed=args.seed)
     imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1)
 
     train_log = CsvLogger(run / "train.csv", TRAIN_FIELDS)
@@ -234,38 +237,61 @@ def train(args: argparse.Namespace) -> Path:
                                                     "best_metric": args.best_metric})
         agent.save(str(run / "checkpoints" / f"agent_{step}.pt"), extra={"env": env_kwargs, "step": step})
 
-    obs, info = env.reset(seed=args.seed)
-    ep_ret, episode = 0.0, 0
+    # Several games at once in worker processes (--num-envs). Each game keeps its
+    # own replay buffer, so n-step returns never mix games.
+    N = max(1, args.num_envs)
+    make = functools.partial(SplixEnv, **env_kwargs)
+    same_step = gym.vector.AutoresetMode.SAME_STEP
+    if N > 1:
+        envs = gym.vector.AsyncVectorEnv([make] * N, autoreset_mode=same_step)
+    else:
+        envs = gym.vector.SyncVectorEnv([make], autoreset_mode=same_step)
+    obs, _ = envs.reset(seed=[args.seed + i for i in range(N)])
+    ep_ret = np.zeros(N)
+    episode = 0
     q_loss = float("nan")
     model_stats: dict = {}
     t0, last_t, last_step = time.time(), time.time(), 0
     run_eval(0)
-    for step in range(1, args.steps + 1):
-        eps = linear_eps(step, args.steps, cfg)
-        action = agent.act(obs, deterministic=False, epsilon=eps)
-        nobs, r, term, trunc, info = env.step(action)
-        real.add(obs["grid"], obs["vec"], action, r, nobs["grid"], nobs["vec"], float(term), end=term or trunc)
-        ep_ret += r
-        if term or trunc:
-            train_log.log({
-                "step": step, "episode": episode, "return": ep_ret, "length": info["steps"],
-                "territory_frac": info["territory_frac"], "peak_territory": info["peak_territory"],
-                "total_captured": info["total_captured"], "kills": info["kills"], "outcome": info["outcome"],
-                "death_cause": info["death_cause"] or "", "opponent": "+".join(info["opponents"]), "epsilon": eps,
-            })
-            episode += 1
-            ep_ret = 0.0
-            obs, info = env.reset()
-        else:
-            obs = nobs
+    step, owed = 0, 0.0
 
-        if step >= cfg.learning_starts and step % cfg.train_freq == 0:
+    def crossed(prev: int, now: int, every: int) -> bool:
+        return every > 0 and prev // every != now // every
+
+    while step < args.steps:
+        eps = linear_eps(step, args.steps, cfg)
+        actions = agent.act_batch(obs, epsilon=eps)
+        nobs, r, term, trunc, info = envs.step(actions)
+        done = term | trunc
+        final_obs = info.get("final_obs")
+        final_info = info.get("final_info", {})
+        for i in range(N):
+            nxt = final_obs[i] if done[i] else {"grid": nobs["grid"][i], "vec": nobs["vec"][i]}
+            real.bufs[i].add(obs["grid"][i], obs["vec"][i], int(actions[i]), float(r[i]),
+                             nxt["grid"], nxt["vec"], float(term[i]), end=bool(done[i]))
+            ep_ret[i] += r[i]
+            if done[i]:
+                fi = {k: v[i] for k, v in final_info.items() if not k.startswith("_")}
+                train_log.log({
+                    "step": step + i + 1, "episode": episode, "return": ep_ret[i], "length": fi["steps"],
+                    "territory_frac": fi["territory_frac"], "peak_territory": fi["peak_territory"],
+                    "total_captured": fi["total_captured"], "kills": fi["kills"], "outcome": fi["outcome"],
+                    "death_cause": fi["death_cause"] or "", "opponent": "+".join(fi["opponents"]), "epsilon": eps,
+                })
+                episode += 1
+                ep_ret[i] = 0.0
+        obs = nobs
+        prev, step = step, step + N
+
+        owed += N / cfg.train_freq  # keep the update-to-data ratio whatever N is
+        while owed >= 1.0 and step >= cfg.learning_starts:
+            owed -= 1.0
             if cfg.n_step > 1:
                 batch = real.sample_nstep(cfg.batch_size, cfg.n_step, cfg.gamma, agent.device)
             else:
                 batch = real.sample(cfg.batch_size, agent.device)
             loss = agent.q_update(batch)
-            want_metrics = step % args.log_every < cfg.train_freq or (cfg.model_gate < 1.0 and step % 500 < cfg.train_freq)
+            want_metrics = crossed(prev, step, args.log_every) or (cfg.model_gate < 1.0 and crossed(prev, step, 500))
             if want_metrics:
                 q_loss = float(loss)
             if agent.planning:
@@ -276,27 +302,27 @@ def train(args: argparse.Namespace) -> Path:
                     for _ in range(cfg.planning_updates):
                         agent.q_update(imagined.sample(cfg.batch_size, agent.device))
         gate_open = cfg.model_gate >= 1.0 or model_stats.get("model_changed_err", 1.0) < cfg.model_gate
-        if agent.planning and step >= cfg.model_warmup and step % cfg.rollout_freq == 0 and gate_open:
+        if agent.planning and step >= cfg.model_warmup and crossed(prev, step, cfg.rollout_freq) and gate_open:
             agent.imagine(real, imagined, eps)
 
-        if step % args.log_every == 0:
+        if crossed(prev, step, args.log_every):
             now = time.time()
             metric_log.log({"step": step, "q_loss": q_loss, **model_stats, "imagined": imagined.size,
                             "q_updates": agent.q_updates, "steps_per_sec": (step - last_step) / (now - last_t)})
             last_t, last_step = now, step
-        if step % args.eval_every == 0 or step == args.steps:
+        if crossed(prev, step, args.eval_every) or step >= args.steps:
             run_eval(step)
-        if args.league_every and step % args.league_every == 0:  # self-play league
+        if crossed(prev, step, args.league_every):  # self-play league
             (run / "league").mkdir(exist_ok=True)
             path = run / "league" / f"agent_{step}.pt"
             agent.sync_actor()
             agent.save(str(path), extra={"env": env_kwargs, "step": step})
-            spec = f"frozen:{path}"
-            league.append(spec)
+            league.append(f"frozen:{path}")
             if len(league) > args.league_size:
                 league.pop(0)
-            env.league = list(league)
+            envs.set_attr("league", [list(league) for _ in range(N)])
             print(f"[league {step:>8}] league: {[opponent_label(x) for x in league]}", flush=True)
+    envs.close()
 
     agent.save(str(run / "agent.pt"), extra={"env": env_kwargs, "step": args.steps})
     for log in (train_log, metric_log, evaluator):

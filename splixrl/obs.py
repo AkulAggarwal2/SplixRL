@@ -296,7 +296,7 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
             enemy = np.log1p(int(np.count_nonzero(land))) / SIZE_LOG_NORM
         vals += [mine, enemy, mine - enemy]
     if cfg.reclaim_features:
-        cheap = cheap_land(game, own)
+        cheap = cheap_land(game, own, p.pos)
         cells = np.argwhere(cheap)
         if len(cells):
             d = np.abs(cells - pos).sum(1)
@@ -329,19 +329,34 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
             vals += [len(cells) / DIST_NORM, d[i] / DIST_NORM, f / DIST_NORM, r / DIST_NORM]
         else:
             vals += [0.0, FAR, 0.0, 0.0]
-    return [float(np.clip(v, -FAR, FAR)) for v in vals]
+    return [max(-FAR, min(FAR, float(v))) for v in vals]
 
 
-def cheap_land(game: SplixGame, own: np.ndarray) -> np.ndarray:
+CHEAP_LAND_RADIUS = 25  # only look for cheap land this close (the server's view range)
+
+
+def cheap_land(game: SplixGame, own: np.ndarray, center: tuple[int, int] | None = None) -> np.ndarray:
     """Empty tiles that are cheap to (re)capture: enclosed by my land, or
-    touching it on two or more sides."""
+    touching it on two or more sides. With ``center``, only within
+    CHEAP_LAND_RADIUS of it (holes are judged inside that window)."""
     from scipy.ndimage import binary_fill_holes
 
-    empty = (game.owner == EMPTY) & (game.trail == EMPTY)
-    holes = binary_fill_holes(own) & ~own
-    p = np.pad(own, 1)
-    sides = p[:-2, 1:-1].astype(int) + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
-    return empty & (holes | (sides >= 2))
+    out = np.zeros_like(own)
+    if center is None:
+        r0, r1, c0, c1 = 0, own.shape[0], 0, own.shape[1]
+    else:
+        R = CHEAP_LAND_RADIUS
+        r0, r1 = max(0, center[0] - R), min(own.shape[0], center[0] + R + 1)
+        c0, c1 = max(0, center[1] - R), min(own.shape[1], center[1] + R + 1)
+    o = own[r0:r1, c0:c1]
+    if not o.any():
+        return out
+    empty = (game.owner[r0:r1, c0:c1] == EMPTY) & (game.trail[r0:r1, c0:c1] == EMPTY)
+    holes = binary_fill_holes(o) & ~o
+    p = np.pad(o, 1)
+    sides = p[:-2, 1:-1].astype(np.int8) + p[2:, 1:-1] + p[1:-1, :-2] + p[1:-1, 2:]
+    out[r0:r1, c0:c1] = empty & (holes | (sides >= 2))
+    return out
 
 
 def _window(planes: np.ndarray, pos: tuple[int, int], radius: int, size: int) -> np.ndarray:
