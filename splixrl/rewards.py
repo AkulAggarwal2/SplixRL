@@ -25,6 +25,27 @@ class RewardConfig:
     shaping: float = 0.0
     gamma: float = 0.99  # must equal the learner's discount for shaping to be exact
 
+    @classmethod
+    def preset(cls, name: str) -> "RewardConfig":
+        """Named settings.
+
+        v1:    +0.1 per cell, +3 per kill, -3 on death.
+        v2:    v1, plus dying or having land stolen costs 0.1 per cell.
+        score: the real game's score -- 1 point per tile, 500 per kill (see the
+               in-game "Kills: 1, Blocks: 3748, Score: 4248") -- scaled by 0.01,
+               and dying loses the land you hold. Kills are worth 50 cells of
+               land here instead of 30 under v1/v2.
+        """
+        presets = {
+            "v1": {},
+            "v2": {"death_per_cell": 0.1, "lost_per_cell": 0.1},
+            "score": {"capture_per_cell": 0.01, "kill": 5.0, "death": 0.0,
+                      "death_per_cell": 0.01, "lost_per_cell": 0.01},
+        }
+        if name not in presets:
+            raise ValueError(f"unknown reward preset {name!r}; choose from {sorted(presets)}")
+        return cls(**presets[name])
+
     def to_dict(self) -> dict:
         return asdict(self)
 

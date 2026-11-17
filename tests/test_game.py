@@ -178,6 +178,19 @@ def test_capture_steals_enclosed_enemy_land():
     assert g.players[1].alive
 
 
+def test_render_follows_a_large_board():
+    """A public-server arena must not become a multi-thousand-pixel picture."""
+    from splixrl.render import render_rgb
+
+    g = SplixGame(size=398, n_players=1, spawn_radius=0)
+    g.players = [Player(pid=0, pos=(10, 10), heading=UP)]
+    focused = render_rgb(g, 16, focus=(10, 10), radius=22)
+    assert focused.shape == (45 * 16 + 4, 45 * 16 + 4, 3)
+    # the same call with no focus still draws every cell
+    small = SplixGame(size=20, n_players=1, spawn_radius=0)
+    assert render_rgb(small, 8).shape[0] == 20 * 8 + 4
+
+
 def test_losing_all_territory_eliminates():
     g = make_game(size=14)
     p0 = _build_loop_around(g)

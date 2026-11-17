@@ -77,6 +77,8 @@ Optional extras:
 | 20×20, 1 LoopBot opponent, 1500 steps | 80% of games (peak 195 cells) | 70% |
 | 40×40, 4 LoopBot opponents, 3000 steps | 0% (peak 363 cells ≈ 23%) | 5% |
 
+**Reward presets** (`--reward-preset`): `v1` as above; `v2` adds 0.1 per cell lost on death or stolen. `score` matches the real game's score. The in-game panel ("Kills: 1, Blocks: 3748, Score: 4248") shows a kill is worth 500 tiles, so `score` pays 0.01 per tile and 5 per kill and keeps the loss of land on death. Under v1/v2 a kill was worth only 30 tiles, which is one reason agents rarely went for kills.
+
 `lag_prob` makes a requested turn land one tile late with that probability, imitating the real server's lag (see "Real game").
 
 ## Opponents
@@ -87,6 +89,7 @@ Optional extras:
 | `random_safe` | random, but never drives into a wall or its own trail |
 | `loop` | small rectangular loops away from enemies, heads home when an enemy is within 4 cells |
 | `chaser` | hunts enemy trails within 10 cells, otherwise loops |
+| `greedy` | big loops, barely checks for danger: lots of land and long trails to cut. A ChaserBot gets 18.7 kills per game against four of them on 40×40 |
 | `frozen:<path>` | any saved agent, weights frozen, playing from its own seat |
 | `loop?max_out=8&danger_dist=2` | bots take keyword arguments |
 
@@ -130,10 +133,11 @@ python -m splixrl.evaluate --actors runs/round1/*/seed0/agent.pt --opponents $PO
 ### Runs toward the real game
 
 `runs/territory40/dyna/seed0` uses:
-* 40×40 board, 4 opponents from the bot pool;
+* 40×40 board, 4 opponents from the pool `random_safe loop chaser greedy`;
+* `--reward-preset score --gamma 0.995` (big loops pay out late; 0.99 made the agent too cautious);
 * territory rules: respawn, win at 50% of the map, 1500 steps;
 * all four options above;
-* `--lag-prob 0.05` and reward v2;
+* `--lag-prob 0.05`;
 * 300k steps.
 
 This is the first agent trained with roughly what a player has on the real server.

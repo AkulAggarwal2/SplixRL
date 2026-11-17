@@ -76,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-episodes", type=int, default=20)
     p.add_argument("--log-every", type=int, default=2_000)
     add_dataclass_args(p, DynaConfig)
+    p.add_argument("--reward-preset", choices=["v1", "v2", "score"], default="v1",
+                   help="starting reward settings; --reward-* flags override single values")
     add_dataclass_args(p, RewardConfig, prefix="reward-")
     return p
 
@@ -89,7 +91,10 @@ def train(args: argparse.Namespace) -> Path:
     run = Path(args.run_dir)
     (run / "checkpoints").mkdir(parents=True, exist_ok=True)
     cfg = dataclass_from_args(DynaConfig, args)
-    reward = dataclass_from_args(RewardConfig, args, prefix="reward_")
+    reward = RewardConfig.preset(args.reward_preset)
+    for k, v in vars(dataclass_from_args(RewardConfig, args, prefix="reward_")).items():
+        if getattr(args, "reward_" + k) is not None:  # explicit flags win over the preset
+            setattr(reward, k, v)
     reward.gamma = cfg.gamma  # shaping is only policy-invariant with the learner's discount
 
     env_kwargs = dict(

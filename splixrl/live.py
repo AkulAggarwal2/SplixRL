@@ -48,10 +48,12 @@ SERVER_DELTA = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1), 4: (0, 0)}  # (dx,
 C_UPDATE_MY_POS, C_SET_USERNAME, C_SKIN, C_READY, C_PING = 1, 2, 3, 4, 7
 # server -> client
 S_PLAYER_STATE, S_FILL_RECT, S_SET_PLAYER_TRAIL, S_PLAYER_DIE = 2, 3, 4, 5
-S_REMOVE_PLAYER, S_MY_SCORE, S_MAP_SIZE, S_GAME_OVER, S_PLAYER_SKIN = 7, 9, 12, 13, 15
+S_REMOVE_PLAYER, S_MY_SCORE, S_MY_RANK, S_LEADERBOARD = 7, 9, 10, 11
+S_MAP_SIZE, S_GAME_OVER, S_PLAYER_SKIN = 12, 13, 15
 S_EMPTY_TRAIL, S_READY, S_UNDO_PLAYER_DIE = 16, 17, 22
 S_MINIMAP = 14
 MINIMAP_SIZE, MINIMAP_PART_W = 80, 20  # 80x80 bitmap of "anyone's land", sent as 4 strips of 20 columns
+MINIMAP_SCALE = 3
 
 TILE_WALL, TILE_EMPTY = 0, 1  # other tile values are skin colour + 2
 DEATH_TYPES = {0: "unknown", 1: "player", 2: "arena-bounds", 3: "self"}
@@ -104,6 +106,9 @@ class LiveState:
         self.my_color: int | None = None
         self.score_tiles = 0
         self.kills = 0
+        self.rank: int | None = None
+        self.total_players = 0
+        self.leaderboard: list[tuple[str, int]] = []
         self.ready = False
         self.game_over: dict | None = None
         self.my_states: list[tuple[float, int, int, int]] = []  # every state update the server sent about us
@@ -160,6 +165,19 @@ class LiveState:
                 self.players.pop(pid, None)
         elif t == S_MY_SCORE:
             self.score_tiles, self.kills = struct.unpack(">IH", m[1:7])
+        elif t == S_MY_RANK:
+            self.rank = struct.unpack(">H", m[1:3])[0]
+        elif t == S_LEADERBOARD:
+            self.total_players = struct.unpack(">H", m[1:3])[0]
+            board, i = [], 3
+            while i + 5 <= len(m):
+                score, nlen = struct.unpack(">IB", m[i : i + 5])
+                i += 5
+                if i + nlen > len(m):
+                    break
+                board.append((m[i : i + nlen].decode("utf-8", errors="replace"), score))
+                i += nlen
+            self.leaderboard = board
         elif t == S_READY:
             self.ready = True
         elif t == S_MINIMAP:
@@ -185,6 +203,11 @@ class LiveState:
         # board cell (r, c) is arena tile (x = c + 1, y = r + 1); the minimap samples tile floor(i * W / 80)
         idx = np.minimum((np.arange(1, n + 1) * MINIMAP_SIZE) // W, MINIMAP_SIZE - 1)
         return self.minimap[np.ix_(idx, idx)]
+
+    def minimap_px(self, x: int, y: int) -> tuple[int, int]:
+        """Server tile (x, y) -> pixel on the 80x80 minimap."""
+        w = self.map_size or MINIMAP_SIZE
+        return (min(MINIMAP_SIZE - 1, x * MINIMAP_SIZE // w), min(MINIMAP_SIZE - 1, y * MINIMAP_SIZE // w))
 
     def _ensure_tiles(self, size: int) -> None:
         if self.tiles is None or self.tiles.shape[0] < size:
@@ -248,6 +271,35 @@ class LiveState:
         return g
 
 
+HEADING_NAME = ["up", "right", "down", "left"]
+FOLLOW_RADIUS = 22  # tiles around the head when the arena does not fit on screen
+PANEL_W = 14 + MINIMAP_SIZE * MINIMAP_SCALE + 14
+
+
+def minimap_image(
+    state: LiveState,
+    me: tuple[int, int],
+    view: tuple[int, int, int, int] | None,
+) -> np.ndarray:
+    """80x80 minimap scaled up: land, the camera rectangle, and where ``me`` (server x, y) is."""
+    mm = np.zeros((MINIMAP_SIZE, MINIMAP_SIZE, 3), np.uint8)
+    mm[:] = (42, 38, 35)
+    mm[state.minimap] = (214, 176, 92)
+    if view is not None:
+        x0, y0, x1, y1 = view
+        px0, py0 = state.minimap_px(max(0, x0), max(0, y0))
+        px1, py1 = state.minimap_px(x1, y1)
+        tone = (110, 168, 214)
+        mm[py0 : py1 + 1, px0] = tone
+        mm[py0 : py1 + 1, px1] = tone
+        mm[py0, px0 : px1 + 1] = tone
+        mm[py1, px0 : px1 + 1] = tone
+    mx, my = state.minimap_px(*me)
+    mm[max(0, my - 1) : my + 2, max(0, mx - 1) : mx + 2] = (168, 86, 255)
+    mm[my, mx] = (255, 255, 255)
+    return np.repeat(np.repeat(mm, MINIMAP_SCALE, 0), MINIMAP_SCALE, 1)
+
+
 class LiveWindow:
     """pygame window drawing the live game as one client sees it."""
 
@@ -258,26 +310,66 @@ class LiveWindow:
         pygame.init()
         self.title = title
         self.screen = None
-        self.font = pygame.font.SysFont("Helvetica", 18)
+        self.font = pygame.font.SysFont("Helvetica", 16)
+        self.font_sm = pygame.font.SysFont("menlo,consolas,couriernew,courier", 14)
 
-    def draw(self, game: SplixGame, lines: list[str]) -> bool:
+    def draw(self, game: SplixGame, state: LiveState, name: str, life: int) -> bool:
         from .render import render_rgb
 
         pg = self.pg
-        cell = max(6, min(24, 760 // game.size))
-        img = render_rgb(game, cell)
-        if self.screen is None:
-            self.screen = pg.display.set_mode((img.shape[1] + 240, max(img.shape[0], 300)))
+        # A local server is about 40 tiles and fits on screen. The public arenas
+        # are 400, and drawing every tile makes a ~2600px window whose frame
+        # takes longer than one tile, so the turn arrives after the player has
+        # already left it. Follow the head instead.
+        me = game.players[0]
+        cell = max(6, min(24, 760 // max(game.size, 1)))
+        view = None
+        if game.size * cell <= 900:
+            img = render_rgb(game, cell)
+        else:
+            cell = 16
+            img = render_rgb(game, cell, focus=me.pos, radius=FOLLOW_RADIUS)
+            r, c = me.pos
+            view = (c + 1 - FOLLOW_RADIUS, r + 1 - FOLLOW_RADIUS, c + 1 + FOLLOW_RADIUS, r + 1 + FOLLOW_RADIUS)
+        x, y = me.pos[1] + 1, me.pos[0] + 1
+        w = state.map_size or 1
+        lines = [
+            name,
+            f"life {life + 1}",
+            "",
+            f"you   x {x}   y {y}",
+            f"      {100 * x / w:.0f}% across, {100 * y / w:.0f}% down",
+            f"facing {HEADING_NAME[me.heading]}",
+            "on your land" if game.owner[me.pos] == 0 else f"trailing  {len(me.trail)} tiles",
+            "",
+            f"tiles {state.score_tiles}    kills {state.kills}",
+            f"rank {state.rank if state.rank is not None else '-'} of {state.total_players or '?'}",
+            f"in view {len(game.players)}    map {w}",
+            "",
+            "leaderboard",
+        ]
+        for i, (who, score) in enumerate(state.leaderboard[:8], start=1):
+            mark = ">" if who == name else " "
+            lines.append(f"{mark}{i} {who[:14]:<14} {score}")
+        lines += ["", "blue box: this view", "white dot: you", "esc: close"]
+        mini = minimap_image(state, (x, y), view)
+        panel_h = 12 + mini.shape[0] + 10 + len(lines) * 18 + 8
+        size = (img.shape[1] + PANEL_W, max(img.shape[0], panel_h, 320))
+        if self.screen is None or self.screen.get_size() != size:
+            self.screen = pg.display.set_mode(size)
             pg.display.set_caption(self.title)
         for e in pg.event.get():
             if e.type == pg.QUIT or (e.type == pg.KEYDOWN and e.key == pg.K_ESCAPE):
                 return False
         self.screen.fill((32, 29, 27))
         self.screen.blit(pg.surfarray.make_surface(np.ascontiguousarray(img.transpose(1, 0, 2))), (0, 0))
-        y = 14
+        ox = img.shape[1] + 14
+        self.screen.blit(pg.surfarray.make_surface(np.ascontiguousarray(mini.transpose(1, 0, 2))), (ox, 12))
+        yy = 12 + mini.shape[0] + 10
         for line in lines:
-            self.screen.blit(self.font.render(line, True, (235, 235, 235)), (img.shape[1] + 14, y))
-            y += 26
+            font = self.font if line == name else self.font_sm
+            self.screen.blit(font.render(line, True, (235, 235, 235)), (ox, yy))
+            yy += 18
         pg.display.flip()
         return True
 
@@ -290,8 +382,112 @@ class _FakeEnv:
         self.obs_config = obs_config
 
 
+class WebLink:
+    """The official Splix page, bridged to the real server. The page renders; we steer."""
+
+    def __init__(self, upstream, browser):
+        self.upstream = upstream
+        self.browser = browser
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.closed = asyncio.Event()
+        self._send_lock = asyncio.Lock()
+        self._done = False
+
+    async def send(self, data) -> None:
+        async with self._send_lock:
+            await self.upstream.send(data)
+
+    def __aiter__(self):
+        return self._messages()
+
+    async def _messages(self):
+        while True:
+            message = await self.queue.get()
+            if message is None:
+                break
+            yield message
+
+    async def run(self) -> None:
+        import websockets
+
+        async def downstream():
+            try:
+                async for message in self.upstream:
+                    if isinstance(message, bytes):
+                        self.queue.put_nowait(message)
+                    await self.browser.send(message)
+            except websockets.ConnectionClosed:
+                pass
+
+        async def upstream():
+            try:
+                async for message in self.browser:
+                    # Arrow keys belong to the page. The actor sends the turns.
+                    if isinstance(message, bytes) and message[:1] == bytes([C_UPDATE_MY_POS]):
+                        continue
+                    async with self._send_lock:
+                        await self.upstream.send(message)
+            except websockets.ConnectionClosed:
+                pass
+
+        tasks = [asyncio.create_task(downstream()), asyncio.create_task(upstream())]
+        try:
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            for sock in (self.upstream, self.browser):
+                try:
+                    await sock.close()
+                except Exception:
+                    pass
+            if not self._done:
+                self._done = True
+                self.closed.set()
+                self.queue.put_nowait(None)
+
+
+class WebRelay:
+    """Local websocket the splix.io page connects to. Each Play click is one life."""
+
+    def __init__(self, upstream: str):
+        self.upstream = upstream
+        self._links: asyncio.Queue = asyncio.Queue()
+        self._server = None
+        self.port: int | None = None
+
+    async def start(self) -> None:
+        import websockets
+
+        self._server = await websockets.serve(self._handler, "127.0.0.1", 0, max_size=None)
+        self.port = self._server.sockets[0].getsockname()[1]
+
+    async def close(self) -> None:
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+
+    async def next_link(self) -> WebLink:
+        return await self._links.get()
+
+    async def _handler(self, browser) -> None:
+        import websockets
+
+        async with websockets.connect(
+            self.upstream, max_size=None, additional_headers={"Origin": "https://splix.io"}
+        ) as upstream:
+            link = WebLink(upstream, browser)
+            await self._links.put(link)
+            await link.run()
+
+    @property
+    def page(self) -> str:
+        return f"https://splix.io/#ip=ws://localhost:{self.port}"
+
+
 async def play_life(server: str, actor, name: str, color: int, max_steps: int, verbose: bool, seat: int = 0,
-                    window: LiveWindow | None = None, life: int = 0) -> dict:
+                    window: LiveWindow | None = None, life: int = 0, relay: WebRelay | None = None) -> dict:
     import websockets
 
     from .obs import ObsConfig
@@ -307,11 +503,23 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
 
     local = urlparse(server).hostname in ("localhost", "127.0.0.1", "::1")
     headers = {"X-Real-IP": f"10.77.0.{seat + 1}"} if local else {}
-    async with websockets.connect(server, max_size=None, additional_headers=headers) as ws:
-        await ws.send(bytes([C_SET_USERNAME]) + name.encode()[:20])
-        await ws.send(bytes([C_SKIN, color, 0]))
-        await ws.send(bytes([C_READY]))
 
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def opened():
+        if relay is None:
+            async with websockets.connect(server, max_size=None, additional_headers=headers) as ws:
+                await ws.send(bytes([C_SET_USERNAME]) + name.encode()[:20])
+                await ws.send(bytes([C_SKIN, color, 0]))
+                await ws.send(bytes([C_READY]))
+                yield ws
+        else:
+            # The website sends the name, the skin and ready. We only steer.
+            print("waiting for you to click Play on splix.io...", flush=True)
+            yield await relay.next_link()
+
+    async with opened() as ws:
         closed = asyncio.Event()
 
         async def reader():
@@ -390,11 +598,6 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                     else:
                         action = actor.act(env, build_obs(game, 0, obs_config))
                     steps += 1
-                    if window is not None:
-                        lines = [f"{name}  (purple)", f"life {life + 1}", f"tiles {state.score_tiles}", f"kills {state.kills}",
-                                 f"players seen {len(game.players)}", "", "esc: close window"]
-                        if not window.draw(game, lines):
-                            window = None
                     new_heading = turn(heading, int(action))
                     if new_heading != heading:
                         sd = HEADING_TO_SERVER[new_heading]
@@ -411,6 +614,8 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                         pending = {"pos": nxt, "dir": sd, "eta": t_next, "tries": 1, "msg": msg,
                                    "before": before, "added_corner": added}
                         decided.add((nxt[0], nxt[1], sd))
+                    if window is not None and not window.draw(game, state, name, life):
+                        window = None
                 await asyncio.sleep(TILE_SEC / 10)
         except websockets.ConnectionClosed:
             pass
@@ -451,8 +656,17 @@ def serve_client(port: int) -> None:
 
 
 async def amain(args) -> None:
+    import webbrowser
+
     stop = asyncio.Event()
     colors = [5, 1, 9, 3, 7, 11, 2, 4, 6, 8, 10, 12]
+    relay = None
+    if args.web:
+        relay = WebRelay(args.server)
+        await relay.start()
+        print(f"real client: {relay.page}", flush=True)
+        print("The server list says \"From url\". Click Play. That page is the game; the agent steers it.", flush=True)
+        webbrowser.open(relay.page)
     bot_tasks = [
         asyncio.create_task(run_forever(args.server, spec, f"{spec}-{i}", colors[(i + 1) % len(colors)], args.max_steps, stop, seat=i + 1))
         for i, spec in enumerate(args.bots)
@@ -461,16 +675,18 @@ async def amain(args) -> None:
     try:
         if args.actor:
             await asyncio.sleep(1.0)  # let the bots spawn first
-            window = LiveWindow(f"SplixRL live - {args.name}") if args.show else None
+            window = LiveWindow(f"SplixRL live - {args.name}") if args.show and relay is None else None
             for life in range(args.lives):
                 rows.append(await play_life(args.server, make_actor(args.actor), args.name, colors[0], args.max_steps,
-                                            verbose=True, window=window, life=life))
+                                            verbose=True, window=window, life=life, relay=relay))
         else:
             await asyncio.Event().wait()  # bots only: run until Ctrl-C
     finally:
         stop.set()
         for t in bot_tasks:
             t.cancel()
+        if relay is not None:
+            await relay.close()
     if rows:
         tiles = [r.get("tiles", 0) for r in rows]
         secs = [r.get("seconds_alive", 0) for r in rows]
@@ -495,6 +711,7 @@ def main(argv=None) -> None:
     ap.add_argument("--out", help="CSV with one row per life")
     ap.add_argument("--serve-client", action="store_true", help="serve the web client at http://127.0.0.1:8000")
     ap.add_argument("--show", action="store_true", help="open a window showing the game as the actor sees it")
+    ap.add_argument("--web", action="store_true", help="open splix.io and let it draw the game while the actor steers")
     args = ap.parse_args(argv)
     if args.serve_client:
         serve_client(8000)

@@ -6,6 +6,8 @@ A spec is a string (or an Opponent factory). String forms:
     "random_safe"       random, but avoids walls and its own trail
     "loop"              LoopBot: small rectangular loops, runs home when threatened
     "chaser"            ChaserBot: hunts nearby enemy trails, otherwise loops
+    "greedy"            LoopBot drawing big loops and ignoring danger until late:
+                        lots of land, and long trails to cut (kill practice)
     "loop?max_out=8&danger_dist=2"   bot with keyword arguments
     "frozen:path/to/agent.pt"        a saved RL agent, frozen (never updated)
 
@@ -25,6 +27,10 @@ BOTS: dict[str, Callable[..., Opponent]] = {
     "random_safe": lambda **kw: RandomBot(safe=True, **kw),
     "loop": LoopBot,
     "chaser": ChaserBot,
+    "greedy": lambda **kw: LoopBot(**{
+        "min_out": 5, "max_out": 12, "min_side": 5, "max_side": 14,
+        "danger_dist": 1, "max_trail": 70, "keep_away": 1, **kw,
+    }),
 }
 
 # the fixed opponent set used for the main comparison (train + eval)

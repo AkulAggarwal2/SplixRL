@@ -319,6 +319,70 @@ def test_dyna_trains_with_rich_observations(tmp_path):
     assert load_agent(str(path)).obs_config == env.obs_config
 
 
+def test_live_minimap_marks_you_and_reads_the_leaderboard():
+    import struct
+
+    from splixrl.live import LiveState, minimap_image
+
+    st = LiveState()
+    st.handle(bytes([12]) + struct.pack(">H", 400), 0.0)
+    st.handle(bytes([10]) + struct.pack(">H", 4), 0.0)
+    msg = bytearray([11]) + struct.pack(">H", 29)
+    msg += struct.pack(">IB", 36022, 6) + b"Turkey"
+    msg += struct.pack(">IB", 25, 7) + b"SplixRL"
+    st.handle(bytes(msg), 0.0)
+    assert st.rank == 4 and st.total_players == 29
+    assert st.leaderboard == [("Turkey", 36022), ("SplixRL", 25)]
+    img = minimap_image(st, (100, 200), (78, 178, 122, 222))
+    assert img.shape == (80 * 3, 80 * 3, 3)
+    mx, my = st.minimap_px(100, 200)  # (20, 40) on a 400 map
+    assert (mx, my) == (20, 40)
+    assert tuple(img[my * 3, mx * 3]) == (255, 255, 255)  # you
+    assert tuple(img[my * 3, mx * 3 - 3]) == (168, 86, 255)
+    # the camera rectangle is the blue box
+    vx, vy = st.minimap_px(78, 178)
+    assert tuple(img[vy * 3, vx * 3]) == (110, 168, 214)
+
+
+def test_web_relay_forwards_the_server_and_drops_keyboard_turns():
+    """The splix.io page must see server bytes, and its arrow keys must not override the actor."""
+    import asyncio
+
+    import websockets
+
+    from splixrl.live import WebRelay
+
+    got = []
+
+    async def upstream(ws):
+        async for message in ws:
+            got.append(message)
+            if message[:1] == bytes([2]):
+                await ws.send(bytes([17]))
+
+    async def run():
+        async with websockets.serve(upstream, "127.0.0.1", 0, max_size=None) as server:
+            port = server.sockets[0].getsockname()[1]
+            relay = WebRelay(f"ws://127.0.0.1:{port}")
+            await relay.start()
+            try:
+                async with websockets.connect(f"ws://127.0.0.1:{relay.port}", max_size=None) as browser:
+                    waiting = asyncio.create_task(relay.next_link())
+                    await browser.send(bytes([2]) + b"me")
+                    await browser.send(bytes([1, 0, 0, 0, 0, 0]))
+                    assert await asyncio.wait_for(browser.recv(), 2) == bytes([17])
+                    link = await waiting
+                    await link.send(bytes([1, 3, 0, 5, 0, 6]))
+                    await asyncio.sleep(0.05)
+            finally:
+                await relay.close()
+
+    asyncio.run(run())
+    assert bytes([2]) + b"me" in got
+    assert bytes([1, 0, 0, 0, 0, 0]) not in got
+    assert bytes([1, 3, 0, 5, 0, 6]) in got
+
+
 def test_live_minimap_decode():
     import struct
 
