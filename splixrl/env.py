@@ -68,6 +68,7 @@ class SplixEnv(gym.Env):
         allow_pause: bool = False,
         max_pause: int = 20,
         memory: int = 0,
+        league_prob: float = 0.15,
         size_range: tuple[int, int] | None = None,
         n_opponents_range: tuple[int, int] | None = None,
         lag_range: tuple[float, float] | None = None,
@@ -87,6 +88,12 @@ class SplixEnv(gym.Env):
         self.spawn_radius = spawn_radius
         self.size = size
         self.pool = list(opponents)
+        # Self-play league: frozen copies of the learning agent, kept apart from
+        # the pool. Each seat draws from the league with probability league_prob,
+        # so a big game holds about one copy instead of several. Frozen agents
+        # build full observations every step, which is slow.
+        self.league: list[str] = []
+        self.league_prob = league_prob
         self.n_opponents = n_opponents
         self.max_steps = max_steps
         self.obs_config = ObsConfig(
@@ -184,8 +191,12 @@ class SplixEnv(gym.Env):
                                       spawn_radius=self.spawn_radius, max_steps=self.max_steps)
         specs = (options or {}).get("opponents")
         if specs is None:
-            idx = rng.integers(len(self.pool), size=self.n_opponents)
-            specs = [self.pool[i] for i in idx]
+            specs = []
+            for _ in range(self.n_opponents):
+                if self.league and rng.random() < self.league_prob:
+                    specs.append(self.league[int(rng.integers(len(self.league)))])
+                else:
+                    specs.append(self.pool[int(rng.integers(len(self.pool)))])
         if len(specs) != self.n_opponents:
             if len(set(map(str, specs))) == 1:  # one spec for every seat
                 specs = [specs[0]] * self.n_opponents

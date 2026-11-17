@@ -84,7 +84,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--lag-range", type=float, nargs=2, metavar=("LO", "HI"), help="new lag probability every episode")
     # league / curriculum
     p.add_argument("--league-every", type=int, default=0, help="every N steps a frozen copy of the agent joins the opponent pool")
-    p.add_argument("--league-size", type=int, default=4, help="keep at most this many frozen copies in the pool")
+    p.add_argument("--league-size", type=int, default=4, help="keep at most this many frozen copies in the league")
+    p.add_argument("--league-prob", type=float, default=0.15, help="chance each seat is a league copy instead of a bot")
     p.add_argument("--init-from", help="start from this checkpoint's weights (same observation settings)")
     # eval
     p.add_argument("--eval-size", type=int, help="fixed board size for evaluation (default: training settings)")
@@ -169,6 +170,7 @@ def train(args: argparse.Namespace) -> Path:
         escape_features=args.escape_features,
         allow_pause=args.allow_pause,
         memory=args.memory,
+        league_prob=args.league_prob,
         max_pause=args.max_pause,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
@@ -291,10 +293,10 @@ def train(args: argparse.Namespace) -> Path:
             agent.save(str(path), extra={"env": env_kwargs, "step": step})
             spec = f"frozen:{path}"
             league.append(spec)
-            env.pool.append(spec)
             if len(league) > args.league_size:
-                env.pool.remove(league.pop(0))
-            print(f"[league {step:>8}] pool: {[opponent_label(x) for x in env.pool]}", flush=True)
+                league.pop(0)
+            env.league = list(league)
+            print(f"[league {step:>8}] league: {[opponent_label(x) for x in league]}", flush=True)
 
     agent.save(str(run / "agent.pt"), extra={"env": env_kwargs, "step": args.steps})
     for log in (train_log, metric_log, evaluator):
