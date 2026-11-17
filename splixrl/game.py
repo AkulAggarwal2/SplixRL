@@ -112,6 +112,7 @@ class SplixGame:
 
     # ------------------------------------------------------------------ setup
     def reset(self, rng: np.random.Generator) -> None:
+        self.obs_memory = {}  # per-seat observation memory (see obs.memory_planes)
         self.owner.fill(EMPTY)
         self.trail.fill(EMPTY)
         self.t = 0
@@ -121,16 +122,26 @@ class SplixGame:
             self.owner[r - s : r + s + 1, c - s : c + s + 1] = pid
             self.players.append(Player(pid=pid, pos=(r, c), heading=int(rng.integers(4))))
 
+    @staticmethod
+    def capacity(size: int, spawn_radius: int = 2, min_spawn_gap: int = 3) -> int:
+        """Roughly how many players random spawning can fit (60% of a tight grid packing)."""
+        lo, hi = spawn_radius + 1, size - spawn_radius - 2
+        if hi < lo:
+            return 0
+        need = 2 * spawn_radius + 1 + min_spawn_gap
+        per_side = (hi - lo) // need + 1
+        return max(1, int(0.6 * per_side * per_side))
+
     def _spawn_centers(self, rng: np.random.Generator) -> list[tuple[int, int]]:
         s = self.spawn_radius
         lo, hi = s + 1, self.size - s - 2  # keep one empty ring between spawn and wall
         if hi < lo:
             raise ValueError(f"board size {self.size} too small for spawn radius {s}")
         need = 2 * s + 1 + self.min_spawn_gap  # Chebyshev distance between centres
-        for _ in range(2000):
+        for _ in range(300):
             centers: list[tuple[int, int]] = []
             for _ in range(self.n_players):
-                for _ in range(200):
+                for _ in range(60):
                     r, c = (int(x) for x in rng.integers(lo, hi + 1, size=2))
                     if all(max(abs(r - r2), abs(c - c2)) >= need for r2, c2 in centers):
                         centers.append((r, c))
@@ -161,6 +172,7 @@ class SplixGame:
                 continue
             self.owner[r - s : r + s + 1, c - s : c + s + 1] = pid
             self.players[pid] = Player(pid=pid, pos=(r, c), heading=int(rng.integers(4)))
+            getattr(self, "obs_memory", {}).pop(pid, None)  # a new life starts with no memories
             return True
         return False
 

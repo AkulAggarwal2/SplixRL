@@ -49,6 +49,17 @@ checkpoints keep their exact inputs):
   a checkpoint without it can be extended (new input weights start at 0).
 * ``pause_feature``: one more ``vec`` number, 1 while I'm paused (set
   automatically when the env allows pausing). After the escape margin.
+* ``memory = m`` (steps, needs ``minimap``): two more minimap-frame channels,
+  always last. "map_enemy_memory": where enemy heads were seen during the last
+  m steps, fading with age, so an enemy that walks out of view isn't forgotten.
+  "map_growth": land that appeared on the minimap during the last m steps,
+  i.e. who is expanding where, at any distance. "map_my_land_lost": land
+  that was mine m steps ago and belongs to someone else now: someone is
+  eating into my territory. Plus four ``vec`` numbers at the very end: how
+  much of my land was taken recently, and the distance and direction to the
+  nearest stolen tile. These need memory, kept on
+  the game object per observing seat (``game.obs_memory``); the live client
+  keeps it across its per-tile snapshots.
 """
 
 from __future__ import annotations
@@ -64,6 +75,9 @@ LOCAL_CHANNELS = ("own_territory", "own_trail", "opp_territory", "opp_trail", "o
 HEADING_LOCAL_CHANNELS = ("own_territory", "own_trail", "opp_territory", "opp_trail", "opp_heads", "opp_next", "wall")
 COARSE_CHANNELS = tuple("coarse_" + c for c in LOCAL_CHANNELS)
 MINIMAP_CHANNELS = ("map_land", "map_me")
+MEMORY_CHANNELS = ("map_enemy_memory", "map_growth", "map_my_land_lost")
+MEMORY_FEATURES = ("land_lost", "lost_dist", "lost_forward", "lost_right")
+MEMORY_SNAPSHOT_EVERY = 10  # steps between stored minimaps for map_growth
 GLOBAL_CHANNELS = ("own_territory", "own_trail", "own_head", "opp_territory", "opp_trail", "opp_heads")
 VEC_FEATURES = (
     "in_own_territory",
@@ -106,12 +120,15 @@ class ObsConfig:
     reclaim_features: bool = False
     escape_features: bool = False
     pause_feature: bool = False
+    memory: int = 0
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
             raise ValueError(f"unknown obs mode {self.mode!r}")
         if self.mode == "global" and (self.coarse_factor or self.minimap):
             raise ValueError("coarse_factor and minimap are for local mode")
+        if self.memory and not self.minimap:
+            raise ValueError("memory channels live in the minimap frame: turn on minimap too")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -138,6 +155,8 @@ class ObsConfig:
             ch += tuple("coarse_" + c for c in self.board_channels)
         if self.minimap:
             ch += MINIMAP_CHANNELS
+        if self.memory:
+            ch += MEMORY_CHANNELS
         return ch
 
     @property
@@ -165,6 +184,8 @@ class ObsConfig:
             v += ESCAPE_FEATURES
         if self.pause_feature:
             v += ("paused",)
+        if self.memory:
+            v += MEMORY_FEATURES
         return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
@@ -205,7 +226,8 @@ def _min_dist(a: np.ndarray, b: np.ndarray) -> float | None:
 
 
 def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
-                  visible: np.ndarray | None, enemy_trail: np.ndarray) -> list[float]:
+                  visible: np.ndarray | None, enemy_trail: np.ndarray,
+                  lost: np.ndarray | None = None) -> list[float]:
     p = game.players[pid]
     pos = np.array(p.pos)
     size = game.size
@@ -298,6 +320,15 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
         vals.append(margin)
     if cfg.pause_feature:
         vals.append(float(getattr(p, "paused", False)))
+    if cfg.memory:
+        cells = np.argwhere(lost) if lost is not None else np.zeros((0, 2), int)
+        if len(cells):
+            d = np.abs(cells - pos).sum(1)
+            i = int(d.argmin())
+            f, r = egocentric(cells[i] - pos, p.heading)
+            vals += [len(cells) / DIST_NORM, d[i] / DIST_NORM, f / DIST_NORM, r / DIST_NORM]
+        else:
+            vals += [0.0, FAR, 0.0, 0.0]
     return [float(np.clip(v, -FAR, FAR)) for v in vals]
 
 
@@ -342,6 +373,56 @@ def minimap_planes(game: SplixGame, pid: int, w: int) -> np.ndarray:
     return out
 
 
+def memory_planes(game: SplixGame, pid: int, w: int, horizon: int,
+                  visible: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+    """(3, w, w) minimap-frame memory (fading last-seen enemy heads, land growth,
+    my land lost) and the full-resolution mask of my land taken by others."""
+    n = game.size
+    clock = int(getattr(game, "clock", game.t))
+    store = getattr(game, "obs_memory", None)
+    if store is None:
+        store = game.obs_memory = {}
+    mem = store.setdefault(pid, {"seen": {}, "maps": []})
+    own_now = game.owner == pid
+    # remember every enemy head I can see right now (keyed by its seat)
+    for q in game.players:
+        if q.alive and q.pid != pid and (visible is None or visible[q.pos]):
+            mem["seen"][getattr(q, "key", q.pid)] = (q.pos, clock)
+    out = np.zeros((3, w, w), np.float32)
+    for key, (pos, t) in list(mem["seen"].items()):
+        age = clock - t
+        if age > horizon or age < 0:
+            del mem["seen"][key]
+            continue
+        r, c = min(w - 1, pos[0] * w // n), min(w - 1, pos[1] * w // n)
+        out[0, r, c] = max(out[0, r, c], 1.0 - age / (horizon + 1))
+    # land growth: compare the minimap now with the oldest one within the horizon
+    land = minimap_planes(game, pid, w)[0]
+    maps = mem["maps"]
+    if not maps or clock - maps[-1][0] >= MEMORY_SNAPSHOT_EVERY:
+        maps.append((clock, land.copy(), own_now.copy()))
+    while len(maps) > 1 and clock - maps[1][0] >= horizon:
+        maps.pop(0)
+    while maps and clock - maps[0][0] > 2 * horizon:  # stale (e.g. after a long gap)
+        maps.pop(0)
+    lost = np.zeros_like(own_now)
+    if maps:
+        out[1] = np.clip(land - maps[0][1], 0.0, 1.0)
+        old_own = maps[0][2]
+        if old_own.shape == own_now.shape:
+            lost = old_own & ~own_now & (game.owner != EMPTY)  # mine before, someone else's now
+            if visible is not None:
+                lost &= visible
+            if lost.any():
+                n = game.size
+                idx = np.minimum(((np.arange(w) + 0.5) * n / w).astype(int), n - 1)
+                # max-pool rather than sample, so a small bite still shows
+                cells = np.argwhere(lost)
+                out[2][np.minimum(cells[:, 0] * w // n, w - 1), np.minimum(cells[:, 1] * w // n, w - 1)] = 1.0
+                del idx
+    return out, lost
+
+
 def build_obs(game: SplixGame, pid: int, cfg: ObsConfig) -> dict[str, np.ndarray]:
     p = game.players[pid]
     owner, trail = game.owner, game.trail
@@ -350,7 +431,8 @@ def build_obs(game: SplixGame, pid: int, cfg: ObsConfig) -> dict[str, np.ndarray
     enemy_trail = (trail != EMPTY) & (trail != pid)
     if visible is not None:
         enemy_trail = enemy_trail & visible
-    vec = _vec_features(game, pid, own, cfg, visible, enemy_trail)
+    mem_planes, lost = memory_planes(game, pid, cfg.width, cfg.memory, visible) if cfg.memory else (None, None)
+    vec = _vec_features(game, pid, own, cfg, visible, enemy_trail, lost)
 
     if cfg.mode == "local":
         board = np.zeros((len(cfg.board_channels), game.size, game.size), np.float32)
@@ -382,6 +464,8 @@ def build_obs(game: SplixGame, pid: int, cfg: ObsConfig) -> dict[str, np.ndarray
         grid = np.concatenate([np.rot90(x, k=p.heading, axes=(1, 2)) for x in parts], 0)
         if cfg.minimap:
             grid = np.concatenate([grid, minimap_planes(game, pid, cfg.width)], 0)
+        if cfg.memory:
+            grid = np.concatenate([grid, mem_planes], 0)
         return {"grid": np.ascontiguousarray(grid), "vec": np.array(vec, np.float32)}
 
     grid = np.zeros((len(GLOBAL_CHANNELS), game.size, game.size), np.float32)

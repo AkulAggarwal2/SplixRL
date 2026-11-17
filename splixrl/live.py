@@ -115,6 +115,7 @@ class LiveState:
         self.game_over: dict | None = None
         self.my_states: list[tuple[float, int, int, int]] = []  # every state update the server sent about us
         self.minimap = np.zeros((MINIMAP_SIZE, MINIMAP_SIZE), bool)  # [y, x]
+        self.obs_memory: dict = {}
 
     # -- messages ---------------------------------------------------------
     def handle(self, m: bytes, now: float) -> None:
@@ -233,6 +234,8 @@ class LiveState:
         g.trail.fill(EMPTY)
         g.t = min(steps, max_steps)
         g.land_hint = self.land_hint()  # far-away land the client only knows from the minimap
+        g.obs_memory = self.obs_memory  # memory channels persist across per-tile snapshots
+        g.clock = steps
 
         def to_rc(x, y):
             return y - 1, x - 1
@@ -263,6 +266,7 @@ class LiveState:
             if not inside(pr, pc):
                 continue
             q = Player(pid=len(g.players), pos=(pr, pc), heading=SERVER_TO_HEADING.get(p.dir, UP))
+            q.key = ("server", p.pid)  # stable across snapshots, for the memory channels
             if p.color is not None and p.color != self.my_color:
                 g.owner[(tiles == p.color) & (g.owner == UNSEEN_OWNER)] = q.pid  # their land, for size features
             if p.trail:

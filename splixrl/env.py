@@ -67,6 +67,7 @@ class SplixEnv(gym.Env):
         escape_features: bool = False,
         allow_pause: bool = False,
         max_pause: int = 20,
+        memory: int = 0,
         size_range: tuple[int, int] | None = None,
         n_opponents_range: tuple[int, int] | None = None,
         lag_range: tuple[float, float] | None = None,
@@ -92,7 +93,7 @@ class SplixEnv(gym.Env):
             mode=obs_mode, view_radius=view_radius, coarse_factor=coarse_factor,
             visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
             enemy_heading=enemy_heading, size_features=size_features, reclaim_features=reclaim_features,
-            escape_features=escape_features, pause_feature=allow_pause,
+            escape_features=escape_features, pause_feature=allow_pause, memory=memory,
         )
         # Pausing (action 3), as the real server allows. max_pause caps how many
         # steps in a row the agent may stay paused (then it goes straight), so
@@ -137,6 +138,7 @@ class SplixEnv(gym.Env):
             reclaim_features=self.obs_config.reclaim_features,
             escape_features=self.obs_config.escape_features,
             allow_pause=self.allow_pause,
+            memory=self.obs_config.memory,
             max_pause=self.max_pause,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
@@ -163,6 +165,8 @@ class SplixEnv(gym.Env):
         if self.size_range or self.n_opponents_range:
             size = int(rng.integers(self.size_range[0], self.size_range[1] + 1)) if self.size_range else self.size
             n = int(rng.integers(self.n_opponents_range[0], self.n_opponents_range[1] + 1)) if self.n_opponents_range else self.n_opponents
+            if self.n_opponents_range:  # don't ask for more players than the board can seat
+                n = max(1, min(n, SplixGame.capacity(size, self.spawn_radius) - 1))
             if size != self.game.size or n + 1 != self.game.n_players:
                 self.size, self.n_opponents = size, n
                 self.game = SplixGame(size=size, n_players=1 + n, spawn_radius=self.spawn_radius, max_steps=self.max_steps)

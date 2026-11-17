@@ -11,6 +11,8 @@ A spec is a string (or an Opponent factory). String forms:
     "invader"           InvaderBot: raids the nearest enemy land and takes it home
     "hunter"            ChaserBot that goes after exposed trails up to 20 tiles away:
                         punishes loops that are too big for how close enemies are
+    "stalker"           ChaserBot that sees exposed trails anywhere (like a human
+                        scanning the minimap, but better) and travels to hunt them
     "loop?max_out=8&danger_dist=2"   bot with keyword arguments
     "frozen:path/to/agent.pt"        a saved RL agent, frozen (never updated)
 
@@ -32,6 +34,7 @@ BOTS: dict[str, Callable[..., Opponent]] = {
     "chaser": ChaserBot,
     "invader": InvaderBot,
     "hunter": lambda **kw: ChaserBot(**{"chase_radius": 20, "chase_max_trail": 45, **kw}),
+    "stalker": lambda **kw: ChaserBot(**{"chase_radius": 80, "chase_max_trail": 90, **kw}),
     "greedy": lambda **kw: LoopBot(**{
         "min_out": 5, "max_out": 12, "min_side": 5, "max_side": 14,
         "danger_dist": 1, "max_trail": 70, "keep_away": 1, **kw,

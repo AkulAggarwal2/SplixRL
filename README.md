@@ -64,6 +64,8 @@ Everything happens on a square grid, and all players move at once each step.
 | `--size-features` | 3 `vec` numbers: my land, nearest enemy's visible land, the difference (log scale) | dying costs your land, so a small agent can risk more against a big one |
 | `--reclaim-features` | 4 `vec` numbers: cheap empty land enclosed by or dented into mine, and the distance and direction to the nearest | when an enemy that ate into your land dies, its land is cleared and a tiny loop takes it back |
 
+| `--memory 100` (needs `--minimap`) | 3 minimap-frame channels: enemy heads seen in the last 100 steps (fading), land that appeared on the minimap, my land now owned by someone else; plus 4 `vec` numbers on stolen land (amount, distance, direction) | humans hunt from the minimap and eat into your land from outside your view; this gives the agent memory of who was around, who is expanding toward it, and what it just lost |
+
 The world model shifts and rotates the fine channels, only rotates the coarse ones, and leaves the minimap alone.
 
 **Learner options** (Dyna; defaults are the original learner): `--n-step 3` (multi-step returns), `--dueling true` (separate state value and action advantage), `--tau 0.005` (soft target updates), `--model-gate 0.35` (plan only while the world model's error on changed cells is below 0.35).
@@ -99,6 +101,7 @@ Optional extras:
 | `chaser` | hunts enemy trails within 10 cells, otherwise loops |
 | `invader` | raids the nearest enemy land (drives 4 tiles in, then home), so agents practise noticing and punishing land theft |
 | `hunter` | a chaser that goes after exposed trails up to 20 tiles away |
+| `stalker` | a chaser that sees exposed trails anywhere on the map and travels to hunt them: a worst-case minimap hunter |
 | `greedy` | big loops, barely checks for danger: lots of land and long trails to cut. A ChaserBot gets 18.7 kills per game against four of them on 40×40 |
 | `frozen:<path>` | any saved agent, weights frozen, playing from its own seat |
 | `loop?max_out=8&danger_dist=2` | bots take keyword arguments |
@@ -187,6 +190,7 @@ This is the first agent trained with roughly what a player has on the real serve
 * **All observation options,** plus `--escape-features`: the escape margin, (nearest enemy's distance to my trail) − (my distance home). That's the game's basic safety rule.
 * **Pausing** (`--allow-pause`): a 4th action, stop moving, at most 20 steps in a row.
 * **Reward `score_rank`:** the real score (1 per tile, 500 per kill, land lost on death), plus up to 3 at the end for holding more land than the opponents. Creeping along with 1–2-tile loops ends up behind, so it no longer pays.
+* **Memory** (`--memory 100`), and **stalker bots** that hunt exposed trails from anywhere on the map.
 * **Hunter bots,** which chase exposed trails from 20 tiles away. Loops too big for how close enemies are get punished, so the escape-margin rule is learned from experience.
 * **Learner:** γ 0.995, 3-step returns, dueling network, soft target, 1 gated planning update.
 * **Evaluation** is fixed at 48×48, 6 opponents, 5% lag, and `best.pt` is chosen by evaluation return (real-score units).

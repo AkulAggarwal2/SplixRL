@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reclaim-features", action="store_true", help="add features for cheap land to take back")
     p.add_argument("--escape-features", action="store_true", help="add the escape margin (enemy reach - my way home)")
     p.add_argument("--allow-pause", action="store_true", help="a 4th action: stop moving, as on the real server")
+    p.add_argument("--memory", type=int, default=0, help="steps of enemy-memory and minimap-growth channels (needs --minimap)")
     p.add_argument("--max-pause", type=int, default=20, help="most steps in a row the agent may stay paused")
     p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
     p.add_argument("--respawn-delay", type=int, default=10)
@@ -167,6 +168,7 @@ def train(args: argparse.Namespace) -> Path:
         reclaim_features=args.reclaim_features,
         escape_features=args.escape_features,
         allow_pause=args.allow_pause,
+        memory=args.memory,
         max_pause=args.max_pause,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,

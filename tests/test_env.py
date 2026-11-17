@@ -217,7 +217,8 @@ def test_lag_delays_turns_by_one_tile():
 
 def test_death_per_cell_makes_return_track_final_territory():
     """With death_per_cell = capture_per_cell, dying gives back everything captured."""
-    env = SplixEnv(size=16, opponents=["random_safe"], reward={"death": 0.0, "kill": 0.0, "death_per_cell": 0.1})
+    env = SplixEnv(size=16, opponents=["random_safe"],
+                   reward={"death": 0.0, "kill": 0.0, "death_per_cell": 0.1, "lost_per_cell": 0.1})
     for seed in range(10):
         env.reset(seed=seed)
         bot = make_opponent("loop")
@@ -228,7 +229,8 @@ def test_death_per_cell_makes_return_track_final_territory():
             ret += r
             done = term or trunc
         if not info["alive"]:
-            assert ret == pytest.approx(-0.1 * start, abs=1e-6)  # only the starting square is "lost"
+            # captures minus stolen minus what was held at death = minus the starting square
+            assert ret == pytest.approx(-0.1 * start, abs=1e-6)
 
 
 def test_territory_rules_respawn_and_target():
@@ -611,3 +613,65 @@ def test_rank_bonus_rewards_finishing_ahead():
         done = term or trunc
     assert info["alive"] and info["rank_share"] >= 0.5
     assert ret >= rc.rank_bonus * 0.5 - 1e-6
+
+
+def test_memory_channels_remember_enemies_and_see_growth():
+    env = SplixEnv(size=60, opponents=["random_safe"], minimap=True, visible_radius=10, memory=50)
+    env.reset(seed=1)
+    g = env.game
+    cfg = env.obs_config
+    ch = cfg.channels
+    i_mem, i_grow = ch.index("map_enemy_memory"), ch.index("map_growth")
+    me, opp = g.players
+    me.pos, opp.pos = (30, 30), (30, 36)  # visible
+    build_obs(g, 0, cfg)
+    opp.pos = (30, 55)  # walks out of view
+    for _ in range(5):
+        g.t += 1
+        grid = build_obs(g, 0, cfg)["grid"]
+    assert grid[i_mem].max() > 0.8  # still remembered where it was last seen
+    g.t += 60
+    grid = build_obs(g, 0, cfg)["grid"]
+    assert grid[i_mem].max() == 0  # forgotten after the horizon
+    g.owner[0:20, 0:20] = 1  # someone grows a lot far away
+    g.t += 20
+    grid = build_obs(g, 0, cfg)["grid"]
+    assert grid[i_grow].sum() > 0 and grid[i_grow][0:4, 0:4].sum() > 0
+
+
+def test_stalker_hunts_from_far_away():
+    env = SplixEnv(size=60, opponents=["stalker"], n_opponents=1)
+    env.reset(seed=2)
+    g = env.game
+    me, st = g.players
+    me.trail = [(10, c) for c in range(10, 20)]
+    for cell in me.trail:
+        g.trail[cell] = 0
+    st.pos = (50, 50)
+    d0 = abs(st.pos[0] - 10) + abs(st.pos[1] - 15)
+    bot = env.opponents[0]
+    for _ in range(8):
+        g.step([0 if g.is_safe(0, 0) else 1, bot.act(g, 1)])
+        if not me.alive:
+            break
+    d1 = min(abs(st.pos[0] - r) + abs(st.pos[1] - c) for r, c in me.trail) if me.trail else 0
+    assert d1 < d0 - 5  # it headed for my trail from ~75 tiles away
+
+
+def test_memory_notices_land_being_stolen():
+    env = SplixEnv(size=40, opponents=["random_safe"], minimap=True, memory=40)
+    env.reset(seed=3)
+    g, cfg = env.game, env.obs_config
+    me = g.players[0]
+    g.owner[g.owner == 0] = EMPTY
+    g.owner[10:20, 10:20] = 0  # my land
+    me.pos, me.heading = (15, 15), 0
+    g.obs_memory = {}  # forget the snapshot taken at reset, before this layout existed
+    build_obs(g, 0, cfg)
+    g.owner[10:13, 17:20] = 1  # an enemy takes a 3x3 corner
+    g.t += 15
+    o = build_obs(g, 0, cfg)
+    v = dict(zip(cfg.vec_features, o["vec"]))
+    assert v["land_lost"] == pytest.approx(9 / 32)
+    assert v["lost_forward"] > 0 and v["lost_right"] > 0  # ahead and to the right of me
+    assert o["grid"][cfg.channels.index("map_my_land_lost")].sum() >= 1
