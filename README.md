@@ -59,6 +59,13 @@ Optional extras:
 * potential-based shaping on trail length (Ng et al. 1999);
 * a per-step cost, a win bonus, and a penalty for cells lost.
 
+**Territory rules** (`--respawn --target-frac 0.5`, with a longer `--max-steps`) are closer to the real game. Dead opponents come back after 10 steps, so killing them never ends the game, and you win by owning that share of the map. Dying is a loss, and running out of steps without reaching the target is a timeout. How often the bots reach 50% of the map:
+
+| setting | LoopBot | ChaserBot |
+|---|---|---|
+| 20×20, 1 LoopBot opponent, 1500 steps | 80% of games (peak 195 cells) | 70% |
+| 40×40, 4 LoopBot opponents, 3000 steps | 0% (peak 363 cells ≈ 23%) | 5% |
+
 `lag_prob` makes a requested turn land one tile late with that probability, imitating the real server's lag (see "Real game").
 
 ## Opponents

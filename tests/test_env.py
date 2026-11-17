@@ -229,3 +229,28 @@ def test_death_per_cell_makes_return_track_final_territory():
             done = term or trunc
         if not info["alive"]:
             assert ret == pytest.approx(-0.1 * start, abs=1e-6)  # only the starting square is "lost"
+
+
+def test_territory_rules_respawn_and_target():
+    env = SplixEnv(size=20, opponents=["random"], n_opponents=2, respawn=True, respawn_delay=3, max_steps=300)
+    env.reset(seed=0)
+    respawned = False
+    for _ in range(300):
+        _, _, term, trunc, info = env.step(TURN_RIGHT)  # circle at home: random bots die and come back
+        assert not (term and info["alive"]), "killing opponents must not end the game with respawn on"
+        respawned |= info["opp_respawns"] > 0
+        if term or trunc:
+            break
+    assert respawned and info["outcome"] in ("win", "loss", "draw")
+    # reaching the target share of the map is a win
+    env = SplixEnv(size=16, opponents=["random_safe"], respawn=True, target_frac=0.1)
+    env.reset(seed=1)
+    bot = make_opponent("loop")
+    bot.reset(env.game, 0, np.random.default_rng(1))
+    done = False
+    while not done:
+        _, _, term, trunc, info = env.step(bot.act(env.game, 0))
+        done = term or trunc
+    assert info["outcome"] in ("win", "loss", "timeout")
+    if info["outcome"] == "win":
+        assert info["territory_frac"] >= 0.1

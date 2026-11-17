@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--opponents", nargs="+", default=list(DEFAULT_POOL), help="training pool (bots or frozen:<path>)")
     p.add_argument("--obs-mode", default="local", choices=["local", "global"])
     p.add_argument("--view-radius", type=int, default=7)
+    p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
+    p.add_argument("--respawn-delay", type=int, default=10)
+    p.add_argument("--target-frac", type=float, default=None, help="territory rules: win at this share of the map")
     p.add_argument("--lag-prob", type=float, default=0.0, help="chance a turn lands one tile late (live-server lag)")
     # eval
     p.add_argument("--eval-opponents", nargs="+", default=list(DEFAULT_POOL))
@@ -95,6 +98,9 @@ def train(args: argparse.Namespace) -> Path:
         view_radius=args.view_radius,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
+        respawn=args.respawn,
+        respawn_delay=args.respawn_delay,
+        target_frac=args.target_frac,
     )
     (run / "config.json").write_text(
         json.dumps(

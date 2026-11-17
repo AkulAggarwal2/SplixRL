@@ -132,6 +132,29 @@ class SplixGame:
             f"could not place {self.n_players} players on a {self.size}x{self.size} board"
         )
 
+    def respawn(self, pid: int, rng: np.random.Generator, tries: int = 300) -> bool:
+        """Bring a dead player back with a fresh start square on empty ground,
+        away from other heads (like joining the real game). False if no room."""
+        if self.players[pid].alive:
+            return False
+        s = self.spawn_radius
+        lo, hi = s + 1, self.size - s - 2
+        if hi < lo:
+            return False
+        need = 2 * s + 1 + self.min_spawn_gap
+        free = (self.owner == EMPTY) & (self.trail == EMPTY)
+        heads = [p.pos for p in self.players if p.alive]
+        for _ in range(tries):
+            r, c = (int(x) for x in rng.integers(lo, hi + 1, size=2))
+            if not free[r - s : r + s + 1, c - s : c + s + 1].all():
+                continue
+            if any(max(abs(r - r2), abs(c - c2)) < need for r2, c2 in heads):
+                continue
+            self.owner[r - s : r + s + 1, c - s : c + s + 1] = pid
+            self.players[pid] = Player(pid=pid, pos=(r, c), heading=int(rng.integers(4)))
+            return True
+        return False
+
     # ---------------------------------------------------------------- queries
     def in_bounds(self, r: int, c: int) -> bool:
         return 0 <= r < self.size and 0 <= c < self.size

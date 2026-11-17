@@ -6,7 +6,7 @@ objects, so bots never share state between episodes or between seats. Pass
 ``options={"opponents": [...]}`` to ``reset`` to choose them for one episode
 (the evaluation code does this so every algorithm meets the same opponents).
 
-Episode end:
+Episode end (default "duel" rules):
 * terminated: the agent died, or every opponent is dead;
 * truncated: ``max_steps`` reached.
 
@@ -15,6 +15,14 @@ win  = agent alive and all opponents dead, or alive at the step limit with
        strictly more territory than every living opponent;
 loss = agent dead (unless everyone died on the same step: draw), or behind
        on territory at the step limit; draw = tied.
+
+"Territory" rules, closer to the real game, where the goal is to take the map
+without dying: ``respawn=True`` brings dead opponents back after
+``respawn_delay`` steps (so killing them never ends the game), and
+``target_frac`` ends the episode with a win once the agent owns that share of
+the board. Then win = reached the target, loss = died, "timeout" = neither
+by ``max_steps``. With ``respawn`` but no target, the step-limit territory
+comparison above decides.
 """
 
 from __future__ import annotations
@@ -46,6 +54,9 @@ class SplixEnv(gym.Env):
         reward: RewardConfig | dict | None = None,
         render_mode: str | None = None,
         lag_prob: float = 0.0,
+        respawn: bool = False,
+        respawn_delay: int = 10,
+        target_frac: float | None = None,
     ):
         if not opponents and n_opponents:
             raise ValueError("opponent pool is empty")
@@ -61,6 +72,9 @@ class SplixEnv(gym.Env):
         # 0 for the main comparison; > 0 to train agents for the live server.
         self.lag_prob = lag_prob
         self._delayed: int | None = None
+        self.respawn = respawn
+        self.respawn_delay = respawn_delay
+        self.target_frac = target_frac
         self.game = SplixGame(
             size=size, n_players=1 + n_opponents, spawn_radius=spawn_radius, max_steps=max_steps
         )
@@ -81,6 +95,9 @@ class SplixEnv(gym.Env):
             view_radius=self.obs_config.view_radius,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
+            respawn=self.respawn,
+            respawn_delay=self.respawn_delay,
+            target_frac=self.target_frac,
         )
 
     def _obs(self) -> dict[str, np.ndarray]:
@@ -102,6 +119,9 @@ class SplixEnv(gym.Env):
             specs = [self.pool[i] for i in idx]
         if len(specs) != self.n_opponents:
             raise ValueError(f"expected {self.n_opponents} opponents, got {len(specs)}")
+        self._specs = list(specs)
+        self._dead_at: dict[int, int] = {}
+        self.opponent_respawns = 0
         self.opponents = [make_opponent(s) for s in specs]
         self.opponent_names = [opponent_label(s) for s in specs]
         for i, opp in enumerate(self.opponents, start=1):
@@ -137,7 +157,14 @@ class SplixEnv(gym.Env):
         opps_dead = all(not p.alive for p in g.players[1:])
         if agent_dead:
             r += rc.death - rc.death_per_cell * self._territory_before
-        terminated = agent_dead or (opps_dead and self.n_opponents > 0)
+        reached = (
+            not agent_dead and self.target_frac is not None
+            and g.territory(0) >= self.target_frac * g.size * g.size
+        )
+        if self.respawn and not agent_dead and not reached:
+            self._respawn_opponents()
+        ends_on_kills = not self.respawn and self.n_opponents > 0
+        terminated = agent_dead or reached or (opps_dead and ends_on_kills)
         truncated = not terminated and g.t >= self.max_steps
         self._peak_territory = max(self._peak_territory, g.territory(0))
 
@@ -148,14 +175,30 @@ class SplixEnv(gym.Env):
         info = self._info(captured=captured)
         info["lagged"] = lagged
         if terminated or truncated:
-            info["outcome"] = self._outcome(agent_dead, opps_dead)
+            info["outcome"] = self._outcome(agent_dead, opps_dead and not self.respawn, reached)
             info["won"] = info["outcome"] == "win"
             if info["won"]:
                 r += rc.win
         return self._obs(), float(r), terminated, truncated, info
 
-    def _outcome(self, agent_dead: bool, opps_dead: bool) -> str:
+    def _respawn_opponents(self) -> None:
         g = self.game
+        for i in range(1, len(g.players)):
+            if g.players[i].alive:
+                continue
+            self._dead_at.setdefault(i, g.t)
+            if g.t - self._dead_at[i] >= self.respawn_delay and g.respawn(i, self.np_random):
+                del self._dead_at[i]
+                self.opponents[i - 1] = make_opponent(self._specs[i - 1])  # fresh bot for the new life
+                self.opponents[i - 1].reset(g, i, np.random.default_rng(int(self.np_random.integers(2**63))))
+                self.opponent_respawns += 1
+
+    def _outcome(self, agent_dead: bool, opps_dead: bool, reached: bool = False) -> str:
+        g = self.game
+        if reached:
+            return "win"
+        if self.target_frac is not None and not agent_dead:
+            return "win" if opps_dead else "timeout"
         if agent_dead:
             # the episode stops as soon as all opponents die, so both being dead
             # here means everyone died on the same step
@@ -163,7 +206,10 @@ class SplixEnv(gym.Env):
         if opps_dead:
             return "win"
         mine = g.territory(0)
-        best = max(g.territory(p.pid) for p in g.players[1:] if p.alive)
+        alive = [g.territory(p.pid) for p in g.players[1:] if p.alive]
+        if not alive:
+            return "win"
+        best = max(alive)
         return "win" if mine > best else "draw" if mine == best else "loss"
 
     def _info(self, captured: int = 0) -> dict:
@@ -182,6 +228,7 @@ class SplixEnv(gym.Env):
             "death_cause": me.death_cause,
             "opponents": list(self.opponent_names),
             "opp_territory": [g.territory(p.pid) for p in g.players[1:]],
+            "opp_respawns": getattr(self, "opponent_respawns", 0),
         }
 
     def render(self):

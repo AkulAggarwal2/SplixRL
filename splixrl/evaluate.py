@@ -40,13 +40,16 @@ def main(argv=None) -> None:
     ap.add_argument("--size", type=int, default=20)
     ap.add_argument("--max-steps", type=int, default=500)
     ap.add_argument("--n-opponents", type=int, default=1)
+    ap.add_argument("--respawn", action="store_true")
+    ap.add_argument("--target-frac", type=float, default=None)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", help="CSV of every episode")
     ap.add_argument("--summary-out", help="CSV of the summary table")
     ap.add_argument("--pivot", help="also print a matrix of this metric, e.g. win_rate")
     args = ap.parse_args(argv)
 
-    env_kwargs = dict(size=args.size, max_steps=args.max_steps, n_opponents=args.n_opponents)
+    env_kwargs = dict(size=args.size, max_steps=args.max_steps, n_opponents=args.n_opponents,
+                      respawn=args.respawn, target_frac=args.target_frac)
     rows = []
     for spec in args.actors:
         actor = make_actor(spec, device=args.device)

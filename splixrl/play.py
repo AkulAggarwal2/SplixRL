@@ -37,9 +37,12 @@ def main(argv=None) -> None:
     ap.add_argument("--fps", type=float, default=6.0, help="moves per second")
     ap.add_argument("--turn-based", action="store_true", help="advance one step per key press")
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--respawn", action="store_true", help="opponents come back after dying")
+    ap.add_argument("--target-frac", type=float, default=None, help="win when you own this share of the map")
     args = ap.parse_args(argv)
 
-    env = SplixEnv(size=args.size, opponents=args.opponents, n_opponents=args.n_opponents, max_steps=args.max_steps)
+    env = SplixEnv(size=args.size, opponents=args.opponents, n_opponents=args.n_opponents, max_steps=args.max_steps,
+                   respawn=args.respawn, target_frac=args.target_frac)
     viewer = Viewer(env, "SplixRL - you are purple")
     pg = viewer.pg
     keymap = {pg.K_UP: 0, pg.K_w: 0, pg.K_RIGHT: 1, pg.K_d: 1, pg.K_DOWN: 2, pg.K_s: 2, pg.K_LEFT: 3, pg.K_a: 3}
@@ -84,7 +87,7 @@ def main(argv=None) -> None:
         names = ["you"] + env.opponent_names
         banner = None
         if over:
-            banner = {"win": "You win!", "loss": "You lose", "draw": "Draw"}[info["outcome"]]
+            banner = {"win": "You win!", "loss": "You lose", "draw": "Draw", "timeout": "Time's up"}[info["outcome"]]
         elif paused:
             banner = "paused"
         footer = [f"reward so far {total:.1f}", ""] + help_lines
