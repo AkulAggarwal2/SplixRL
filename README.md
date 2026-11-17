@@ -129,7 +129,7 @@ mkdir -p server client && tar -xf splixGameServer_macos.tar -C server && tar -xf
 .splix-server/server/splixGameServer -s 40
 
 # terminal 2: an agent plays 10 lives against 4 bots, with a window showing what it sees
-python -m splixrl.live --actor runs/round0/dyna/seed1/best.pt --lives 10 \
+python -m splixrl.live --actor runs/round0_reward2/dyna/seed0/best.pt --lives 10 \
     --bots loop chaser loop random_safe --show --out runs/live/dyna.csv
 ```
 
