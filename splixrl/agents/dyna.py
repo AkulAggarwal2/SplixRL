@@ -59,6 +59,11 @@ class DynaConfig:
     model_sample: str = "threshold"  # "threshold" (p > .5) or "bernoulli"
     model_hidden: int = 48
     actor_sync: int = 50  # Q-updates between copies of the learner to the CPU acting net
+    # stability options (defaults = the original learner, so old checkpoints load as they were)
+    n_step: int = 1  # n-step returns for real data: captures and kills pay off a few steps late
+    dueling: bool = False  # separate state value and action advantage (Wang et al. 2016)
+    tau: float = 0.0  # > 0: soft target update every step (Polyak); 0: hard copy every target_update
+    model_gate: float = 1.0  # plan only while the model's error on changed cells is below this
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -66,8 +71,9 @@ class DynaConfig:
 
 # ---------------------------------------------------------------- networks
 class QNetwork(nn.Module):
-    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int):
+    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int, dueling: bool = False):
         super().__init__()
+        self.dueling = dueling
         c, h, w = grid_shape
         self.conv = nn.Sequential(
             nn.Conv2d(c, 32, 3, padding=1),
@@ -80,12 +86,22 @@ class QNetwork(nn.Module):
         )
         with torch.no_grad():
             n = self.conv(torch.zeros(1, c, h, w)).shape[1]
-        self.head = nn.Sequential(
-            nn.Linear(n + n_vec, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS)
-        )
+        if dueling:
+            self.body = nn.Sequential(nn.Linear(n + n_vec, hidden), nn.ReLU())
+            self.value = nn.Linear(hidden, 1)
+            self.advantage = nn.Linear(hidden, N_ACTIONS)
+        else:
+            self.head = nn.Sequential(
+                nn.Linear(n + n_vec, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS)
+            )
 
     def forward(self, grid: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
-        return self.head(torch.cat([self.conv(grid), vec], 1))
+        x = torch.cat([self.conv(grid), vec], 1)
+        if not self.dueling:
+            return self.head(x)
+        h = self.body(x)
+        adv = self.advantage(h)
+        return self.value(h) + adv - adv.mean(1, keepdim=True)
 
 
 class WorldModel(nn.Module):
@@ -198,16 +214,19 @@ class ReplayBuffer:
         self.next_grid = np.zeros((capacity, *grid_shape), np.uint8)
         self.next_vec = np.zeros((capacity, n_vec), np.float32)
         self.done = np.zeros(capacity, np.float32)  # terminated only, never truncated
+        self.end = np.zeros(capacity, bool)  # episode ended here (terminated or truncated)
         self.size = 0
         self.ptr = 0
         self.rng = np.random.default_rng(seed)
 
-    def add(self, grid, vec, action, reward, next_grid, next_vec, done) -> None:
-        """Add one transition or a batch (leading dim)."""
+    def add(self, grid, vec, action, reward, next_grid, next_vec, done, end=None) -> None:
+        """Add one transition or a batch (leading dim). ``end`` marks the last
+        step of an episode (terminated or truncated); defaults to ``done``."""
         grid = np.asarray(grid)
         if grid.ndim == self.grid.ndim - 1:
             grid, vec, next_grid, next_vec = grid[None], np.asarray(vec)[None], np.asarray(next_grid)[None], np.asarray(next_vec)[None]
             action, reward, done = np.array([action]), np.array([reward]), np.array([done])
+            end = None if end is None else np.array([end])
         n = len(grid)
         idx = (self.ptr + np.arange(n)) % self.capacity
         self.grid[idx] = grid
@@ -217,6 +236,7 @@ class ReplayBuffer:
         self.next_grid[idx] = next_grid
         self.next_vec[idx] = next_vec
         self.done[idx] = done
+        self.end[idx] = np.asarray(done, bool) if end is None else end
         self.ptr = int((self.ptr + n) % self.capacity)
         self.size = min(self.size + n, self.capacity)
 
@@ -231,6 +251,39 @@ class ReplayBuffer:
             t(self.next_grid),
             t(self.next_vec),
             t(self.done),
+        )
+
+    def sample_nstep(self, n: int, steps: int, gamma: float, device) -> tuple[torch.Tensor, ...]:
+        """Batch of n-step transitions built from consecutive single steps.
+
+        Requires transitions added in order from one environment. Returns the
+        usual 7 tensors plus the discount to apply to the bootstrap value
+        (gamma ** k, where k <= steps is how many steps were summed before the
+        episode ended).
+        """
+        oldest = (self.ptr - self.size) % self.capacity
+        span = max(1, self.size - steps + 1)  # starts whose next `steps` entries all exist
+        start = (oldest + self.rng.integers(0, span, size=n)) % self.capacity
+        ret = np.zeros(n, np.float32)
+        disc = np.ones(n, np.float32)
+        last = start.copy()
+        open_ = np.ones(n, bool)  # still accumulating
+        for k in range(steps):
+            idx = (start + k) % self.capacity
+            ret += open_ * disc * self.reward[idx]
+            last = np.where(open_, idx, last)
+            disc = np.where(open_, disc * gamma, disc)
+            open_ &= ~self.end[idx]
+        t = lambda a, dt=torch.float32: torch.as_tensor(a, dtype=dt, device=device)  # noqa: E731
+        return (
+            t(self.grid[start]),
+            t(self.vec[start]),
+            t(self.action[start], torch.int64),
+            t(ret),
+            t(self.next_grid[last]),
+            t(self.next_vec[last]),
+            t(self.done[last]),
+            t(disc),
         )
 
     def sample_states(self, n: int, device) -> tuple[torch.Tensor, torch.Tensor]:
@@ -263,8 +316,8 @@ class DynaAgent(Agent):
         torch.manual_seed(seed)
 
         c = self.cfg
-        self.q = QNetwork(self.grid_shape, n_vec, c.hidden).to(self.device)
-        self.q_target = QNetwork(self.grid_shape, n_vec, c.hidden).to(self.device)
+        self.q = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling).to(self.device)
+        self.q_target = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling).to(self.device)
         self.q_target.load_state_dict(self.q.state_dict())
         self.q_opt = torch.optim.Adam(self.q.parameters(), lr=c.lr)
         self.model = WorldModel(self.grid_shape, n_vec, c.model_hidden).to(self.device)
@@ -275,7 +328,7 @@ class DynaAgent(Agent):
         if self.device.type == "cpu":
             self.q_actor = self.q
         else:
-            self.q_actor = QNetwork(self.grid_shape, n_vec, c.hidden)
+            self.q_actor = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling)
             self.sync_actor()
 
     @property
@@ -296,19 +349,26 @@ class DynaAgent(Agent):
 
     # -- learning --------------------------------------------------------------
     def q_update(self, batch) -> float:
-        grid, vec, action, reward, ngrid, nvec, done = batch
+        """Double DQN update. ``batch`` may carry an 8th tensor: per-sample
+        bootstrap discount (n-step data); otherwise gamma is used."""
+        grid, vec, action, reward, ngrid, nvec, done = batch[:7]
+        disc = batch[7] if len(batch) > 7 else self.cfg.gamma
         q = self.q(grid, vec).gather(1, action[:, None]).squeeze(1)
         with torch.no_grad():
             next_a = self.q(ngrid, nvec).argmax(1, keepdim=True)  # online net selects
             next_q = self.q_target(ngrid, nvec).gather(1, next_a).squeeze(1)  # target net evaluates
-            target = reward + self.cfg.gamma * (1.0 - done) * next_q
+            target = reward + disc * (1.0 - done) * next_q
         loss = F.smooth_l1_loss(q, target)
         self.q_opt.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.grad_clip)
         self.q_opt.step()
         self.q_updates += 1
-        if self.q_updates % self.cfg.target_update == 0:
+        if self.cfg.tau > 0:
+            with torch.no_grad():
+                for pt, po in zip(self.q_target.parameters(), self.q.parameters()):
+                    pt.lerp_(po, self.cfg.tau)
+        elif self.q_updates % self.cfg.target_update == 0:
             self.q_target.load_state_dict(self.q.state_dict())
         if self.q_updates % self.cfg.actor_sync == 0:
             self.sync_actor()

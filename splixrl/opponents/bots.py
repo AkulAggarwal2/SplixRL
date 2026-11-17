@@ -174,3 +174,43 @@ class ChaserBot(LoopBot):
                         self.phase = "return"  # after the chase, go home
                     return a
         return super().act(game, pid)
+
+
+class InvaderBot(LoopBot):
+    """Steals land: heads for the nearest enemy territory within ``reach``,
+    drives ``depth`` tiles into it, then goes home, so the loop closes around
+    the stolen cells. Otherwise plays like LoopBot. Gives agents practice at
+    noticing an invader, cutting its trail from the safety of their own land,
+    and taking the land back."""
+
+    name = "invader"
+
+    def __init__(self, reach: int = 14, depth: int = 4, max_trail: int = 40, **kw):
+        super().__init__(max_trail=max_trail, keep_away=1, danger_dist=2, **kw)
+        self.reach = reach
+        self.depth = depth
+
+    def reset(self, game: SplixGame, pid: int, rng: np.random.Generator) -> None:
+        super().reset(game, pid, rng)
+        self.raid = 0  # tiles driven into enemy land on the current raid
+
+    def act(self, game: SplixGame, pid: int) -> int:
+        p = game.players[pid]
+        enemy_land = (game.owner >= 0) & (game.owner != pid)
+        if game.owner[p.pos] == pid:
+            self.raid = 0
+        if enemy_land[p.pos]:
+            self.raid += 1
+        if self.raid >= self.depth or len(p.trail) >= self.max_trail or (self.raid and self._danger(game, pid)):
+            self.phase = "return"
+            return self.go_home(game, pid)
+        if enemy_land.any() and self.raid < self.depth:
+            cells = np.argwhere(enemy_land)
+            if int(np.abs(cells - np.array(p.pos)).sum(1).min()) <= self.reach:
+                a = bfs_first_action(game, pid, enemy_land, game.trail == pid, self._order())
+                if a is not None and game.is_safe(pid, a):
+                    if game.owner[p.pos] != pid:
+                        self.phase = "out"
+                        self.leg, self.leg_left = 1, 0
+                    return a
+        return super().act(game, pid)

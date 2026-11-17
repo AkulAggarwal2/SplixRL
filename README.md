@@ -58,7 +58,13 @@ Everything happens on a square grid, and all players move at once each step.
 | `--threat-features` | 3 `vec` numbers: nearest enemy head to my land, enemy trail cells on my land, distance to the nearest enemy trail | defending land (stolen cells cost reward), and an enemy trail on your land is a free kill |
 | `--minimap` | 2 channels: anyone's land on the whole board, and my position, north-up; heading added to `vec` | the real minimap: an 80×80 bitmap of occupied land, decoded by `live.py` |
 
+| `--enemy-heading` | 1 channel: the tile in front of each visible enemy head | tells who is coming at you or your land, not just where they are |
+| `--size-features` | 3 `vec` numbers: my land, nearest enemy's visible land, the difference (log scale) | dying costs your land, so a small agent can risk more against a big one |
+| `--reclaim-features` | 4 `vec` numbers: cheap empty land enclosed by or dented into mine, and the distance and direction to the nearest | when an enemy that ate into your land dies, its land is cleared and a tiny loop takes it back |
+
 The world model shifts and rotates the fine channels, only rotates the coarse ones, and leaves the minimap alone.
+
+**Learner options** (Dyna; defaults are the original learner): `--n-step 3` (multi-step returns), `--dueling true` (separate state value and action advantage), `--tau 0.005` (soft target updates), `--model-gate 0.35` (plan only while the world model's error on changed cells is below 0.35).
 
 **Reward** (`RewardConfig`, the same for every algorithm):
 * +0.1 per cell captured
@@ -89,6 +95,7 @@ Optional extras:
 | `random_safe` | random, but never drives into a wall or its own trail |
 | `loop` | small rectangular loops away from enemies, heads home when an enemy is within 4 cells |
 | `chaser` | hunts enemy trails within 10 cells, otherwise loops |
+| `invader` | raids the nearest enemy land (drives 4 tiles in, then home), so agents practise noticing and punishing land theft |
 | `greedy` | big loops, barely checks for danger: lots of land and long trails to cut. A ChaserBot gets 18.7 kills per game against four of them on 40×40 |
 | `frozen:<path>` | any saved agent, weights frozen, playing from its own seat |
 | `loop?max_out=8&danger_dist=2` | bots take keyword arguments |
@@ -130,15 +137,27 @@ python -m splixrl.train_dyna --run-dir runs/round1/dyna/seed0 --opponents $POOL
 python -m splixrl.evaluate --actors runs/round1/*/seed0/agent.pt --opponents $POOL --pivot win_rate
 ```
 
+### Round 0 results so far (Dyna, 20×20, 1 opponent, 50 games per opponent, best checkpoint by evaluation)
+
+| actor | vs random_safe | vs loop | vs chaser |
+|---|---|---|---|
+| LoopBot (baseline) | 0.90 | 0.48 | 0.10 |
+| Dyna, reward v1 (seed 1 at 50k, its peak) | 0.96 | 0.98 | 0.56 |
+| Dyna, reward v2, seed 0 | 0.96 | 0.78 | 0.68 |
+| Dyna, reward v2, seed 1 | 0.98 | 0.94 | 0.76 |
+| Dyna, reward v2, seed 2 | 0.96 | 0.46 | 0.16 |
+
+Under v1 every seed later collapsed (0–0.05 vs chaser after 70k). v2 held up much longer, but still drifted late (0–0.1 vs chaser at 190k), and seed 2 never got good. `best.pt` keeps the peak. Ablations running: `runs/ablation/dyna_noplan` (planning off) and `runs/ablation/dyna_stable` (n-step, dueling, soft target, lower learning rate, gated planning).
+
 ### Runs toward the real game
 
 `runs/territory40/dyna/seed0` uses:
-* 40×40 board, 4 opponents from the pool `random_safe loop chaser greedy`;
+* 40×40 board, 4 opponents from the pool `random_safe loop chaser greedy invader`;
 * `--reward-preset score --gamma 0.995` (big loops pay out late; 0.99 made the agent too cautious);
 * territory rules: respawn, win at 50% of the map, 1500 steps;
-* all four options above;
+* all the observation options above, and the learner options;
 * `--lag-prob 0.05`;
-* 300k steps.
+* 400k steps.
 
 This is the first agent trained with roughly what a player has on the real server.
 

@@ -8,6 +8,7 @@ A spec is a string (or an Opponent factory). String forms:
     "chaser"            ChaserBot: hunts nearby enemy trails, otherwise loops
     "greedy"            LoopBot drawing big loops and ignoring danger until late:
                         lots of land, and long trails to cut (kill practice)
+    "invader"           InvaderBot: raids the nearest enemy land and takes it home
     "loop?max_out=8&danger_dist=2"   bot with keyword arguments
     "frozen:path/to/agent.pt"        a saved RL agent, frozen (never updated)
 
@@ -20,13 +21,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .base import Opponent, bfs_first_action, safe_actions
-from .bots import ChaserBot, LoopBot, RandomBot
+from .bots import ChaserBot, InvaderBot, LoopBot, RandomBot
 
 BOTS: dict[str, Callable[..., Opponent]] = {
     "random": lambda **kw: RandomBot(safe=False, **kw),
     "random_safe": lambda **kw: RandomBot(safe=True, **kw),
     "loop": LoopBot,
     "chaser": ChaserBot,
+    "invader": InvaderBot,
     "greedy": lambda **kw: LoopBot(**{
         "min_out": 5, "max_out": 12, "min_side": 5, "max_side": 14,
         "danger_dist": 1, "max_trail": 70, "keep_away": 1, **kw,
@@ -84,6 +86,7 @@ __all__ = [
     "BOTS",
     "DEFAULT_POOL",
     "ChaserBot",
+    "InvaderBot",
     "LoopBot",
     "Opponent",
     "RandomBot",

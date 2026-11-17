@@ -61,6 +61,9 @@ class SplixEnv(gym.Env):
         visible_radius: int | None = None,
         threat_features: bool = False,
         minimap: bool = False,
+        enemy_heading: bool = False,
+        size_features: bool = False,
+        reclaim_features: bool = False,
     ):
         if not opponents and n_opponents:
             raise ValueError("opponent pool is empty")
@@ -71,6 +74,7 @@ class SplixEnv(gym.Env):
         self.obs_config = ObsConfig(
             mode=obs_mode, view_radius=view_radius, coarse_factor=coarse_factor,
             visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
+            enemy_heading=enemy_heading, size_features=size_features, reclaim_features=reclaim_features,
         )
         self.reward_config = reward if isinstance(reward, RewardConfig) else RewardConfig.from_dict(reward)
         self.render_mode = render_mode
@@ -104,6 +108,9 @@ class SplixEnv(gym.Env):
             visible_radius=self.obs_config.visible_radius,
             threat_features=self.obs_config.threat_features,
             minimap=self.obs_config.minimap,
+            enemy_heading=self.obs_config.enemy_heading,
+            size_features=self.obs_config.size_features,
+            reclaim_features=self.obs_config.reclaim_features,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
             respawn=self.respawn,

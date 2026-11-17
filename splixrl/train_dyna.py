@@ -36,6 +36,8 @@ def add_dataclass_args(parser: argparse.ArgumentParser, cls, prefix: str = "") -
     for f in dataclasses.fields(cls):
         flag = "--" + prefix + f.name.replace("_", "-")
         typ = type(f.default)
+        if typ is bool:  # argparse's bool("False") is True
+            typ = lambda v: str(v).lower() in ("1", "true", "yes")  # noqa: E731
         parser.add_argument(flag, type=typ, default=None, help=f"default {f.default}")
 
 
@@ -66,6 +68,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--visible-radius", type=int, default=None, help="hide opponents beyond this many tiles (server: 25)")
     p.add_argument("--threat-features", action="store_true", help="add enemy-near-my-land features")
     p.add_argument("--minimap", action="store_true", help="add the real game's minimap channels")
+    p.add_argument("--enemy-heading", action="store_true", help="mark the tile in front of each enemy head")
+    p.add_argument("--size-features", action="store_true", help="add my-size vs nearest-enemy-size features")
+    p.add_argument("--reclaim-features", action="store_true", help="add features for cheap land to take back")
     p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
     p.add_argument("--respawn-delay", type=int, default=10)
     p.add_argument("--target-frac", type=float, default=None, help="territory rules: win at this share of the map")
@@ -109,6 +114,9 @@ def train(args: argparse.Namespace) -> Path:
         visible_radius=args.visible_radius,
         threat_features=args.threat_features,
         minimap=args.minimap,
+        enemy_heading=args.enemy_heading,
+        size_features=args.size_features,
+        reclaim_features=args.reclaim_features,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
         respawn=args.respawn,
@@ -158,7 +166,7 @@ def train(args: argparse.Namespace) -> Path:
         eps = linear_eps(step, args.steps, cfg)
         action = agent.act(obs, deterministic=False, epsilon=eps)
         nobs, r, term, trunc, info = env.step(action)
-        real.add(obs["grid"], obs["vec"], action, r, nobs["grid"], nobs["vec"], float(term))
+        real.add(obs["grid"], obs["vec"], action, r, nobs["grid"], nobs["vec"], float(term), end=term or trunc)
         ep_ret += r
         if term or trunc:
             train_log.log({
@@ -174,17 +182,23 @@ def train(args: argparse.Namespace) -> Path:
             obs = nobs
 
         if step >= cfg.learning_starts and step % cfg.train_freq == 0:
-            loss = agent.q_update(real.sample(cfg.batch_size, agent.device))
-            want_metrics = step % args.log_every < cfg.train_freq
+            if cfg.n_step > 1:
+                batch = real.sample_nstep(cfg.batch_size, cfg.n_step, cfg.gamma, agent.device)
+            else:
+                batch = real.sample(cfg.batch_size, agent.device)
+            loss = agent.q_update(batch)
+            want_metrics = step % args.log_every < cfg.train_freq or (cfg.model_gate < 1.0 and step % 500 < cfg.train_freq)
             if want_metrics:
                 q_loss = float(loss)
             if agent.planning:
                 stats = agent.model_update(real.sample(cfg.model_batch_size, agent.device), with_metrics=want_metrics)
                 model_stats = stats or model_stats
-                if step >= cfg.model_warmup and imagined.size >= cfg.batch_size:
+                model_ok = model_stats.get("model_changed_err", 1.0) < cfg.model_gate or cfg.model_gate >= 1.0
+                if step >= cfg.model_warmup and imagined.size >= cfg.batch_size and model_ok:
                     for _ in range(cfg.planning_updates):
                         agent.q_update(imagined.sample(cfg.batch_size, agent.device))
-        if agent.planning and step >= cfg.model_warmup and step % cfg.rollout_freq == 0:
+        gate_open = cfg.model_gate >= 1.0 or model_stats.get("model_changed_err", 1.0) < cfg.model_gate
+        if agent.planning and step >= cfg.model_warmup and step % cfg.rollout_freq == 0 and gate_open:
             agent.imagine(real, imagined, eps)
 
         if step % args.log_every == 0:

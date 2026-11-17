@@ -56,6 +56,7 @@ MINIMAP_SIZE, MINIMAP_PART_W = 80, 20  # 80x80 bitmap of "anyone's land", sent a
 MINIMAP_SCALE = 3
 
 TILE_WALL, TILE_EMPTY = 0, 1  # other tile values are skin colour + 2
+UNSEEN_OWNER = 120  # snapshot owner id for land whose player isn't in view
 DEATH_TYPES = {0: "unknown", 1: "player", 2: "arena-bounds", 3: "self"}
 
 
@@ -226,7 +227,8 @@ class LiveState:
         tiles = self.tiles[1 : W - 1, 1 : W - 1]
         mine = tiles == self.my_color
         g.owner[mine] = 0
-        g.owner[(tiles >= 2) & ~mine] = 1
+        # land of players we can't see yet: owned, but by nobody in the player list
+        g.owner[(tiles >= 2) & ~mine] = UNSEEN_OWNER
         g.trail.fill(EMPTY)
         g.t = min(steps, max_steps)
         g.land_hint = self.land_hint()  # far-away land the client only knows from the minimap
@@ -260,11 +262,13 @@ class LiveState:
             if not inside(pr, pc):
                 continue
             q = Player(pid=len(g.players), pos=(pr, pc), heading=SERVER_TO_HEADING.get(p.dir, UP))
+            if p.color is not None and p.color != self.my_color:
+                g.owner[(tiles == p.color) & (g.owner == UNSEEN_OWNER)] = q.pid  # their land, for size features
             if p.trail:
                 for tx, ty in raster(p.trail + [(x, y)]):
                     tr, tc = to_rc(tx, ty)
                     if inside(tr, tc) and g.trail[tr, tc] == EMPTY:
-                        g.trail[tr, tc] = 1
+                        g.trail[tr, tc] = q.pid
                         q.trail.append((tr, tc))
             g.players.append(q)
         g.n_players = len(g.players)

@@ -7,7 +7,7 @@ from splixrl import SplixEnv
 from splixrl.agents import load_agent
 from splixrl.agents.dyna import DynaAgent, DynaConfig, align
 from splixrl.evaluation import AgentActor, BotActor, evaluate, summarize
-from splixrl.game import DOWN, LEFT, RIGHT, STRAIGHT, TURN_LEFT, TURN_RIGHT, UP
+from splixrl.game import DOWN, EMPTY, LEFT, RIGHT, STRAIGHT, TURN_LEFT, TURN_RIGHT, UP
 from splixrl.obs import LOCAL_CHANNELS, ObsConfig, build_obs
 from splixrl.opponents import make_opponent
 from splixrl.play import relative_action
@@ -398,3 +398,84 @@ def test_live_minimap_decode():
     assert hint.shape == (98, 98) and hint.any()
     rows, cols = np.nonzero(hint)
     assert set(rows + 1) <= {12, 13, 14} and set(cols + 1) <= {31, 32, 33}
+
+
+def test_nstep_returns_stop_at_episode_end():
+    from splixrl.agents.dyna import ReplayBuffer
+
+    buf = ReplayBuffer(16, (1, 1, 1), 1, seed=0)
+    g = np.zeros((1, 1, 1))
+    # episode A: rewards 1, 2, 3 (ends, terminal); episode B: 10, 20 ...
+    for r, done, end in [(1, 0, 0), (2, 0, 0), (3, 1, 1), (10, 0, 0), (20, 0, 0), (30, 0, 0)]:
+        buf.add(g, [r], 0, r, g, [r], done, end=end)
+    gamma = 0.5
+    grid, vec, a, ret, ng, nvec, done, disc = buf.sample_nstep(200, 3, gamma, "cpu")
+    for v, R, d, dc, nv in zip(vec[:, 0], ret, done, disc, nvec[:, 0]):
+        v = float(v)
+        if v == 1:  # 1 + .5*2 + .25*3 = 2.75, then the episode ended (terminal)
+            assert R == pytest.approx(2.75) and d == 1 and dc == pytest.approx(0.125)
+        if v == 2:  # 2 + .5*3, stops at the end of episode A
+            assert R == pytest.approx(3.5) and nv == 3 and dc == pytest.approx(0.25)
+        if v == 10:  # 10 + .5*20 + .25*30 = 27.5, bootstraps from the 3rd step's next state
+            assert R == pytest.approx(27.5) and d == 0 and nv == 30
+    assert 30 not in vec[:, 0].tolist()  # the last steps can't start a full 3-step window
+
+
+def test_stability_options_train_and_reload(tmp_path):
+    from splixrl.agents.dyna import ReplayBuffer
+
+    env = SplixEnv(size=16, opponents=["loop"])
+    obs, _ = env.reset(seed=0)
+    cfg = DynaConfig(n_step=3, dueling=True, tau=0.01, model_gate=0.5)
+    shp, nv = env.observation_space["grid"].shape, env.observation_space["vec"].shape[0]
+    agent = DynaAgent(env.obs_config, shp, nv, cfg)
+    buf = ReplayBuffer(256, shp, nv)
+    for _ in range(100):
+        a = agent.act(obs, deterministic=False, epsilon=0.5)
+        nobs, r, term, trunc, _ = env.step(a)
+        buf.add(obs["grid"], obs["vec"], a, r, nobs["grid"], nobs["vec"], float(term), end=term or trunc)
+        obs = nobs if not (term or trunc) else env.reset()[0]
+    before = [p.clone() for p in agent.q_target.parameters()]
+    agent.q_update(buf.sample_nstep(16, 3, cfg.gamma, "cpu"))
+    after = list(agent.q_target.parameters())
+    assert any(not torch.equal(b, a) for b, a in zip(before, after))  # soft update moved the target
+    path = tmp_path / "d.pt"
+    agent.save(str(path))
+    loaded = load_agent(str(path))
+    assert loaded.cfg.dueling and loaded.act(obs) == agent.act(obs)
+
+
+def test_enemy_heading_and_size_features():
+    env = SplixEnv(size=30, opponents=["random_safe"], enemy_heading=True, size_features=True,
+                   coarse_factor=3, minimap=True, visible_radius=25)
+    obs, _ = env.reset(seed=2)
+    cfg = env.obs_config
+    assert cfg.board_channels[5] == "opp_next" and cfg.fine_channels == 7 and cfg.rotating_channels == 14
+    assert obs["grid"].shape == (7 + 7 + 2, 15, 15)
+    me, opp = env.game.players
+    me.pos, me.heading = (15, 15), 0
+    opp.pos, opp.heading = (15, 19), 3  # 4 tiles to my right, facing left (towards me)
+    g = build_obs(env.game, 0, cfg)["grid"]
+    assert g[4, 7, 11] == 1 and g[5, 7, 10] == 1  # head, and the tile it moves into next
+    v = dict(zip(cfg.vec_features, build_obs(env.game, 0, cfg)["vec"]))
+    assert v["my_size"] == pytest.approx(np.log1p(25) / 8) and v["enemy_size"] == pytest.approx(np.log1p(25) / 8)
+    env.game.owner[0:5, 0:20] = 1  # the enemy grows
+    v = dict(zip(cfg.vec_features, build_obs(env.game, 0, cfg)["vec"]))
+    assert v["size_advantage"] < 0
+
+
+def test_reclaim_features_find_holes_left_by_a_dead_enemy():
+    env = SplixEnv(size=30, opponents=["random_safe"], reclaim_features=True)
+    env.reset(seed=4)
+    g = env.game
+    me = g.players[0]
+    me.pos, me.heading = (15, 15), 0
+    g.owner[g.owner == 0] = EMPTY
+    g.owner[10:21, 10:21] = 0  # an 11x11 block of my land
+    v = dict(zip(env.obs_config.vec_features, build_obs(g, 0, env.obs_config)["vec"]))
+    assert v["cheap_land"] == 0
+    g.owner[12:15, 17:20] = EMPTY  # an enemy that had eaten a 3x3 hole died: the hole is empty now
+    v = dict(zip(env.obs_config.vec_features, build_obs(g, 0, env.obs_config)["vec"]))
+    assert v["cheap_land"] == pytest.approx(9 / 32)
+    assert v["cheap_dist"] == pytest.approx(3 / 32)  # nearest hole cell (14,17) from (15,15)
+    assert v["cheap_forward"] > 0 and v["cheap_right"] > 0  # ahead and to the right
