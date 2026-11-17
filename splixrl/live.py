@@ -280,8 +280,12 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
     # The server rate-limits new connections per IP and takes the IP from
     # X-Real-IP when present. All our clients run on this machine, so each seat
     # gets its own made-up address; otherwise bots respawning would lock out
-    # each other (and the browser). Only meaningful on your own local server.
-    headers = {"X-Real-IP": f"10.77.0.{seat + 1}"}
+    # each other (and the browser). Only sent to a server on this machine:
+    # telling someone else's server a made-up address would be spoofing.
+    from urllib.parse import urlparse
+
+    local = urlparse(server).hostname in ("localhost", "127.0.0.1", "::1")
+    headers = {"X-Real-IP": f"10.77.0.{seat + 1}"} if local else {}
     async with websockets.connect(server, max_size=None, additional_headers=headers) as ws:
         await ws.send(bytes([C_SET_USERNAME]) + name.encode()[:20])
         await ws.send(bytes([C_SKIN, color, 0]))
