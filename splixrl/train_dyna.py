@@ -25,7 +25,7 @@ import torch
 from .agents.dyna import DynaAgent, DynaConfig, ReplayBuffer, pick_device
 from .env import SplixEnv
 from .evaluation import CsvLogger, TrainingEvaluator
-from .opponents import DEFAULT_POOL
+from .opponents import DEFAULT_POOL, opponent_label
 from .rewards import RewardConfig
 
 TRAIN_FIELDS = ("step", "episode", "return", "length", "territory_frac", "peak_territory", "total_captured", "kills", "outcome", "death_cause", "opponent", "epsilon")
@@ -71,11 +71,24 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--enemy-heading", action="store_true", help="mark the tile in front of each enemy head")
     p.add_argument("--size-features", action="store_true", help="add my-size vs nearest-enemy-size features")
     p.add_argument("--reclaim-features", action="store_true", help="add features for cheap land to take back")
+    p.add_argument("--escape-features", action="store_true", help="add the escape margin (enemy reach - my way home)")
     p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
     p.add_argument("--respawn-delay", type=int, default=10)
     p.add_argument("--target-frac", type=float, default=None, help="territory rules: win at this share of the map")
     p.add_argument("--lag-prob", type=float, default=0.0, help="chance a turn lands one tile late (live-server lag)")
+    p.add_argument("--size-range", type=int, nargs=2, metavar=("LO", "HI"), help="new board size every episode")
+    p.add_argument("--n-opponents-range", type=int, nargs=2, metavar=("LO", "HI"), help="new opponent count every episode")
+    p.add_argument("--lag-range", type=float, nargs=2, metavar=("LO", "HI"), help="new lag probability every episode")
+    # league / curriculum
+    p.add_argument("--league-every", type=int, default=0, help="every N steps a frozen copy of the agent joins the opponent pool")
+    p.add_argument("--league-size", type=int, default=4, help="keep at most this many frozen copies in the pool")
+    p.add_argument("--init-from", help="start from this checkpoint's weights (same observation settings)")
     # eval
+    p.add_argument("--eval-size", type=int, help="fixed board size for evaluation (default: training settings)")
+    p.add_argument("--eval-n-opponents", type=int, help="fixed opponent count for evaluation")
+    p.add_argument("--eval-lag", type=float, help="fixed lag for evaluation")
+    p.add_argument("--best-metric", default="win_rate", choices=["win_rate", "return", "peak_territory", "territory_frac"],
+                   help="evaluation number (averaged over opponents) that picks best.pt")
     p.add_argument("--eval-opponents", nargs="+", default=list(DEFAULT_POOL))
     p.add_argument("--eval-every", type=int, default=10_000)
     p.add_argument("--eval-episodes", type=int, default=20)
@@ -117,16 +130,29 @@ def train(args: argparse.Namespace) -> Path:
         enemy_heading=args.enemy_heading,
         size_features=args.size_features,
         reclaim_features=args.reclaim_features,
+        escape_features=args.escape_features,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
         respawn=args.respawn,
         respawn_delay=args.respawn_delay,
         target_frac=args.target_frac,
+        size_range=args.size_range,
+        n_opponents_range=args.n_opponents_range,
+        lag_range=args.lag_range,
     )
+    eval_kwargs = dict(env_kwargs)
+    if args.eval_size or args.eval_n_opponents or args.eval_lag is not None:
+        eval_kwargs.update(size_range=None, n_opponents_range=None, lag_range=None)
+        eval_kwargs["size"] = args.eval_size or args.size
+        eval_kwargs["n_opponents"] = args.eval_n_opponents or args.n_opponents
+        if args.eval_lag is not None:
+            eval_kwargs["lag_prob"] = args.eval_lag
     (run / "config.json").write_text(
         json.dumps(
             {"algo": "dyna", "seed": args.seed, "steps": args.steps, "env": env_kwargs, "dyna": cfg.to_dict(),
-             "eval": {"opponents": args.eval_opponents, "episodes": args.eval_episodes, "every": args.eval_every}},
+             "eval": {"opponents": args.eval_opponents, "episodes": args.eval_episodes, "every": args.eval_every,
+                      "env": eval_kwargs, "best_metric": args.best_metric},
+             "league": {"every": args.league_every, "size": args.league_size}, "init_from": args.init_from},
             indent=2,
         )
     )
@@ -138,22 +164,32 @@ def train(args: argparse.Namespace) -> Path:
     grid_shape = env.observation_space["grid"].shape
     n_vec = env.observation_space["vec"].shape[0]
     agent = DynaAgent(env.obs_config, grid_shape, n_vec, cfg, device=pick_device(args.device), seed=args.seed)
+    if args.init_from:  # curriculum: continue from an earlier stage's weights
+        ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
+        agent.q.load_state_dict(ck["q"])
+        agent.q_target.load_state_dict(ck["q"])
+        if "model" in ck:
+            agent.model.load_state_dict(ck["model"])
+        agent.sync_actor()
+        print(f"initialised from {args.init_from}", flush=True)
     real = ReplayBuffer(cfg.buffer_size, grid_shape, n_vec, seed=args.seed)
     imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1)
 
     train_log = CsvLogger(run / "train.csv", TRAIN_FIELDS)
     metric_log = CsvLogger(run / "metrics.csv", METRIC_FIELDS)
-    evaluator = TrainingEvaluator(run, env_kwargs, args.eval_opponents, args.eval_episodes)
+    evaluator = TrainingEvaluator(run, eval_kwargs, args.eval_opponents, args.eval_episodes)
+    league: list[str] = []
 
-    best = {"score": -1.0}
+    best = {"score": -float("inf")}
 
     def run_eval(step: int) -> None:
         agent.sync_actor()
         summary = evaluator(agent, step)
-        score = float(np.mean([r["win_rate"] for r in summary]))
+        score = float(np.mean([r[args.best_metric] for r in summary]))
         if score > best["score"]:  # keep the checkpoint with the best mean win rate
             best["score"] = score
-            agent.save(str(run / "best.pt"), extra={"env": env_kwargs, "step": step, "mean_win_rate": score})
+            agent.save(str(run / "best.pt"), extra={"env": env_kwargs, "step": step, "mean_win_rate": score,
+                                                    "best_metric": args.best_metric})
         agent.save(str(run / "checkpoints" / f"agent_{step}.pt"), extra={"env": env_kwargs, "step": step})
 
     obs, info = env.reset(seed=args.seed)
@@ -208,6 +244,17 @@ def train(args: argparse.Namespace) -> Path:
             last_t, last_step = now, step
         if step % args.eval_every == 0 or step == args.steps:
             run_eval(step)
+        if args.league_every and step % args.league_every == 0:  # self-play league
+            (run / "league").mkdir(exist_ok=True)
+            path = run / "league" / f"agent_{step}.pt"
+            agent.sync_actor()
+            agent.save(str(path), extra={"env": env_kwargs, "step": step})
+            spec = f"frozen:{path}"
+            league.append(spec)
+            env.pool.append(spec)
+            if len(league) > args.league_size:
+                env.pool.remove(league.pop(0))
+            print(f"[league {step:>8}] pool: {[opponent_label(x) for x in env.pool]}", flush=True)
 
     agent.save(str(run / "agent.pt"), extra={"env": env_kwargs, "step": args.steps})
     for log in (train_log, metric_log, evaluator):

@@ -64,9 +64,24 @@ class SplixEnv(gym.Env):
         enemy_heading: bool = False,
         size_features: bool = False,
         reclaim_features: bool = False,
+        escape_features: bool = False,
+        size_range: tuple[int, int] | None = None,
+        n_opponents_range: tuple[int, int] | None = None,
+        lag_range: tuple[float, float] | None = None,
     ):
-        if not opponents and n_opponents:
+        """``size_range`` / ``n_opponents_range`` / ``lag_range`` (inclusive)
+        draw a new board size, opponent count and lag for every episode, so an
+        agent sees many layouts and crowd sizes (local observations only: the
+        input shape doesn't depend on the board size). The fixed values are
+        used until the first reset and when no range is given."""
+        if not opponents and (n_opponents or n_opponents_range):
             raise ValueError("opponent pool is empty")
+        if obs_mode != "local" and size_range:
+            raise ValueError("size_range needs local observations")
+        self.size_range = tuple(size_range) if size_range else None
+        self.n_opponents_range = tuple(n_opponents_range) if n_opponents_range else None
+        self.lag_range = tuple(lag_range) if lag_range else None
+        self.spawn_radius = spawn_radius
         self.size = size
         self.pool = list(opponents)
         self.n_opponents = n_opponents
@@ -75,6 +90,7 @@ class SplixEnv(gym.Env):
             mode=obs_mode, view_radius=view_radius, coarse_factor=coarse_factor,
             visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
             enemy_heading=enemy_heading, size_features=size_features, reclaim_features=reclaim_features,
+            escape_features=escape_features,
         )
         self.reward_config = reward if isinstance(reward, RewardConfig) else RewardConfig.from_dict(reward)
         self.render_mode = render_mode
@@ -111,11 +127,15 @@ class SplixEnv(gym.Env):
             enemy_heading=self.obs_config.enemy_heading,
             size_features=self.obs_config.size_features,
             reclaim_features=self.obs_config.reclaim_features,
+            escape_features=self.obs_config.escape_features,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
             respawn=self.respawn,
             respawn_delay=self.respawn_delay,
             target_frac=self.target_frac,
+            size_range=self.size_range,
+            n_opponents_range=self.n_opponents_range,
+            lag_range=self.lag_range,
         )
 
     def _obs(self) -> dict[str, np.ndarray]:
@@ -130,13 +150,33 @@ class SplixEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         rng = self.np_random
-        self.game.reset(rng)
+        if self.size_range or self.n_opponents_range:
+            size = int(rng.integers(self.size_range[0], self.size_range[1] + 1)) if self.size_range else self.size
+            n = int(rng.integers(self.n_opponents_range[0], self.n_opponents_range[1] + 1)) if self.n_opponents_range else self.n_opponents
+            if size != self.game.size or n + 1 != self.game.n_players:
+                self.size, self.n_opponents = size, n
+                self.game = SplixGame(size=size, n_players=1 + n, spawn_radius=self.spawn_radius, max_steps=self.max_steps)
+        if self.lag_range:
+            self.lag_prob = float(rng.uniform(*self.lag_range))
+        while True:
+            try:
+                self.game.reset(rng)
+                break
+            except ValueError:  # too many players for this board: drop one and try again
+                if not self.n_opponents_range or self.n_opponents <= 1:
+                    raise
+                self.n_opponents -= 1
+                self.game = SplixGame(size=self.size, n_players=1 + self.n_opponents,
+                                      spawn_radius=self.spawn_radius, max_steps=self.max_steps)
         specs = (options or {}).get("opponents")
         if specs is None:
             idx = rng.integers(len(self.pool), size=self.n_opponents)
             specs = [self.pool[i] for i in idx]
         if len(specs) != self.n_opponents:
-            raise ValueError(f"expected {self.n_opponents} opponents, got {len(specs)}")
+            if len(set(map(str, specs))) == 1:  # one spec for every seat
+                specs = [specs[0]] * self.n_opponents
+            else:
+                raise ValueError(f"expected {self.n_opponents} opponents, got {len(specs)}")
         self._specs = list(specs)
         self._dead_at: dict[int, int] = {}
         self.opponent_respawns = 0

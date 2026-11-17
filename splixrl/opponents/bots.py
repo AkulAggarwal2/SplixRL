@@ -50,6 +50,7 @@ class LoopBot(Opponent):
         max_trail: int = 24,
         wander: float = 0.2,
         keep_away: int = 2,
+        jitter: bool = False,
     ):
         self.min_out, self.max_out = min_out, max_out
         self.min_side, self.max_side = min_side, max_side
@@ -57,10 +58,22 @@ class LoopBot(Opponent):
         self.max_trail = max_trail
         self.wander = wander  # chance of a random turn while inside its territory
         self.keep_away = keep_away
+        # jitter: every life draws its own loop sizes and caution around these
+        # settings, so a learner can't memorise one bot's habits
+        self.jitter = jitter
+        self._base = (min_out, max_out, min_side, max_side, danger_dist, max_trail, keep_away)
 
     def reset(self, game: SplixGame, pid: int, rng: np.random.Generator) -> None:
         super().reset(game, pid, rng)
         self.phase = "home"  # home -> out -> return -> home
+        if self.jitter:
+            mo, xo, ms, xs, dd, mt, ka = self._base
+            scale = float(rng.uniform(0.6, 1.8))  # timid ... bold
+            self.min_out, self.max_out = max(1, round(mo * scale)), max(2, round(xo * scale))
+            self.min_side, self.max_side = max(1, round(ms * scale)), max(2, round(xs * scale))
+            self.danger_dist = max(1, round(dd / scale))
+            self.max_trail = max(8, round(mt * scale))
+            self.keep_away = int(rng.integers(max(0, ka - 1), ka + 2))
 
     # -- helpers -----------------------------------------------------------
     def _order(self) -> list[int]:
@@ -186,7 +199,9 @@ class InvaderBot(LoopBot):
     name = "invader"
 
     def __init__(self, reach: int = 14, depth: int = 4, max_trail: int = 40, **kw):
-        super().__init__(max_trail=max_trail, keep_away=1, danger_dist=2, **kw)
+        kw.setdefault("keep_away", 1)
+        kw.setdefault("danger_dist", 3)
+        super().__init__(max_trail=max_trail, **kw)
         self.reach = reach
         self.depth = depth
 
@@ -201,10 +216,12 @@ class InvaderBot(LoopBot):
             self.raid = 0
         if enemy_land[p.pos]:
             self.raid += 1
-        if self.raid >= self.depth or len(p.trail) >= self.max_trail or (self.raid and self._danger(game, pid)):
+        # like a sensible player: abort the raid as soon as an enemy head gets close
+        if p.trail and (self.raid >= self.depth or len(p.trail) >= self.max_trail or self._danger(game, pid)):
             self.phase = "return"
             return self.go_home(game, pid)
-        if enemy_land.any() and self.raid < self.depth:
+        near_enemy = int(self._enemy_dist(game, pid)[p.pos]) <= self.danger_dist + 3
+        if enemy_land.any() and self.raid < self.depth and not near_enemy:
             cells = np.argwhere(enemy_land)
             if int(np.abs(cells - np.array(p.pos)).sum(1).min()) <= self.reach:
                 a = bfs_first_action(game, pid, enemy_land, game.trail == pid, self._order())

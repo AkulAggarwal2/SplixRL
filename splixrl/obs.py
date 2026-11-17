@@ -42,6 +42,11 @@ checkpoints keep their exact inputs):
   (left behind when an enemy that ate into my land dies, since the dead
   player's land is cleared). How many there are, and the distance and
   direction to the nearest one; a tiny loop takes them back.
+* ``escape_features``: one more ``vec`` number, the escape margin: (nearest
+  visible enemy's distance to my trail or head) - (my distance home). The
+  basic safety rule of the game: keep it positive, i.e. only go as far out as
+  you can get back before anyone can cut you off. Always the last feature, so
+  a checkpoint without it can be extended (new input weights start at 0).
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ VEC_FEATURES = (
 THREAT_FEATURES = ("home_threat_dist", "enemy_trail_on_my_land", "enemy_trail_dist")
 SIZE_FEATURES = ("my_size", "enemy_size", "size_advantage")
 RECLAIM_FEATURES = ("cheap_land", "cheap_dist", "cheap_forward", "cheap_right")
+ESCAPE_FEATURES = ("escape_margin",)
 SIZE_LOG_NORM = 8.0  # log1p(cells) / 8: ~1 at 3000 cells
 HEADING_FEATURES = ("heading_up", "heading_right", "heading_down", "heading_left")
 GLOBAL_EXTRA_VEC = HEADING_FEATURES
@@ -96,6 +102,7 @@ class ObsConfig:
     enemy_heading: bool = False
     size_features: bool = False
     reclaim_features: bool = False
+    escape_features: bool = False
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
@@ -151,6 +158,8 @@ class ObsConfig:
             v += RECLAIM_FEATURES
         if self.mode == "global" or self.minimap:
             v += HEADING_FEATURES
+        if self.escape_features:
+            v += ESCAPE_FEATURES
         return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
@@ -273,6 +282,15 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
         heading = [0.0] * 4
         heading[p.heading] = 1.0
         vals += heading
+    if cfg.escape_features:
+        if not len(opp_heads):
+            margin = FAR
+        else:
+            exposed = np.array([*p.trail, p.pos]).reshape(-1, 2) if p.trail else pos[None, :]
+            enemy_reach = _min_dist(exposed, opp_heads)
+            my_way_home = 0.0 if in_own else (home[0] * DIST_NORM if terr else FAR * DIST_NORM)
+            margin = (enemy_reach - my_way_home) / DIST_NORM
+        vals.append(margin)
     return [float(np.clip(v, -FAR, FAR)) for v in vals]
 
 

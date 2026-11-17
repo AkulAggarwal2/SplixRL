@@ -147,7 +147,14 @@ python -m splixrl.evaluate --actors runs/round1/*/seed0/agent.pt --opponents $PO
 | Dyna, reward v2, seed 1 | 0.98 | 0.94 | 0.76 |
 | Dyna, reward v2, seed 2 | 0.96 | 0.46 | 0.16 |
 
-Under v1 every seed later collapsed (0–0.05 vs chaser after 70k). v2 held up much longer, but still drifted late (0–0.1 vs chaser at 190k), and seed 2 never got good. `best.pt` keeps the peak. Ablations running: `runs/ablation/dyna_noplan` (planning off) and `runs/ablation/dyna_stable` (n-step, dueling, soft target, lower learning rate, gated planning).
+Under v1 every seed later collapsed (0–0.05 vs chaser after 70k). v2 held up much longer, but still drifted late (0–0.1 vs chaser at 190k), and seed 2 never got good. `best.pt` keeps the peak. **Ablation (seed 0): planning causes the late collapse.** Win rate vs loop / chaser at 40k, 120k and 200k steps:
+
+| | 40k | 120k | 200k |
+|---|---|---|---|
+| Dyna, 3 imagined updates per real one | 0.85 / 0.70 | 0.40 / 0.00 | 0.35 / 0.00 |
+| same learner, planning off | 0.90 / 0.50 | 0.75 / 0.65 | 0.70 / 0.35 |
+
+Imagined transitions from an imperfect world model slowly pull the Q-values off course; without them the learner holds up. This is one seed so far, and more are needed. `runs/ablation/dyna_stable` (n-step, dueling, soft target, learning rate 1e-4, gated planning) learns much more slowly, most likely because of the learning rate.
 
 ### Runs toward the real game
 
@@ -165,6 +172,19 @@ This is the first agent trained with roughly what a player has on the real serve
 
 1. **Turtling beat the bots.** An agent that just circles inside its start square beat LoopBot 48/50 and ChaserBot 44/50: the bots drew loops right past it and got cut. Fix: bots leave home on the side away from enemy heads and keep 2 cells from them. After the fix the turtler loses 48/50 and 47/50. `test_bots_beat_turtling` guards this.
 2. **The reward paid for risk the game punishes.** With reward v1 (+0.1 per cell, flat −3 for dying), Dyna's training return kept rising after 50k steps (peak territory 52 → 103 cells), while its win rate against LoopBot fell from 0.85–1.0 to 0.15–0.2 and against ChaserBot from 0.35–0.65 to 0–0.05, in all 3 seeds. Big loops pay +6 and up, so getting cut sometimes is worth it under the reward, but losing everything on death loses the game. Fix (reward v2): `--reward-death-per-cell 0.1 --reward-lost-per-cell 0.1`. The return then adds up to final territory plus kills, like the real score. Runs: `runs/round0` (v1) vs `runs/round0_reward2` (v2). Training also keeps `best.pt`, the checkpoint with the best mean evaluation win rate.
+
+3. **Kill farming.** On 40×40 with respawning opponents, the agent learned to sit at home and cut InvaderBots as they raided: 20–25 kills a game, while its land stayed at 30–50 cells. The invaders walked into its land predictably. Fix: invaders abort a raid when an enemy head gets close and don't start one next to an enemy. An agent circling at home now gets 0 kills against them.
+4. **Wall hugging under lag.** An agent trained without lag turns on the last tile before walls: with 5% of turns landing a tile late, it dies to walls in 21 of 30 simulator games (0 of 30 without lag), and in 61 of 100 lives on the real server. Fix: train with `--lag-prob` / `--lag-range`.
+
+### Stage 2: training for the real game
+
+`runs/stage2/dyna/seed0`, 600k steps:
+* **Every episode is different:** board 24–72 tiles, 2–10 opponents, 0–10% lag, respawning opponents spawned anywhere. Bots draw new loop sizes and caution each life (`?jitter=true`).
+* **Self-play league:** every 25k steps a frozen copy of the agent joins the opponent pool (newest 4 kept).
+* **All observation options,** plus `--escape-features`: the escape margin, (nearest enemy's distance to my trail) − (my distance home). That's the game's basic safety rule.
+* **Learner:** score reward, γ 0.995, 3-step returns, dueling network, soft target, 1 gated planning update.
+* **Evaluation** is fixed at 48×48, 6 opponents, 5% lag, and `best.pt` is chosen by evaluation return (real-score units).
+* `--init-from` can warm-start a stage from an earlier checkpoint with the same inputs.
 
 ## Real game
 

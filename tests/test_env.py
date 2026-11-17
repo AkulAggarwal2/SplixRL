@@ -479,3 +479,49 @@ def test_reclaim_features_find_holes_left_by_a_dead_enemy():
     assert v["cheap_land"] == pytest.approx(9 / 32)
     assert v["cheap_dist"] == pytest.approx(3 / 32)  # nearest hole cell (14,17) from (15,15)
     assert v["cheap_forward"] > 0 and v["cheap_right"] > 0  # ahead and to the right
+
+
+def test_episode_randomization_and_bot_jitter():
+    env = SplixEnv(size=30, opponents=["loop?jitter=true"], n_opponents=2, size_range=(24, 48),
+                   n_opponents_range=(1, 5), lag_range=(0.0, 0.1), respawn=True, coarse_factor=3, minimap=True)
+    seen = set()
+    shape = None
+    for seed in range(12):
+        obs, _ = env.reset(seed=seed)
+        seen.add((env.game.size, len(env.game.players) - 1))
+        assert 24 <= env.game.size <= 48 and 1 <= len(env.game.players) - 1 <= 5 and 0 <= env.lag_prob <= 0.1
+        assert shape is None or obs["grid"].shape == shape  # input shape never changes
+        shape = obs["grid"].shape
+        env.step(0)
+    assert len(seen) > 4
+    sizes = {(b.max_out, b.danger_dist) for b in env.opponents}
+    bots = [make_opponent("loop?jitter=true") for _ in range(10)]
+    for i, b in enumerate(bots):
+        b.reset(env.game, 1, np.random.default_rng(i))
+    assert len({(b.max_out, b.danger_dist, b.keep_away) for b in bots}) > 3
+
+
+def test_escape_margin_sign():
+    env = SplixEnv(size=40, opponents=["random_safe"], escape_features=True)
+    env.reset(seed=5)
+    g = env.game
+    me, opp = g.players
+    g.owner.fill(EMPTY)
+    g.owner[18:23, 5:10] = 0  # my land, cols 5-9
+    me.pos, me.heading = (20, 15), 1  # 6 tiles out to the right of my land
+    me.trail = [(20, c) for c in range(10, 16)]
+    for cell in me.trail:
+        g.trail[cell] = 0
+    g.owner[0:3, 30:35] = 1
+    opp.pos = (2, 32)  # far away: safe
+    m = build_obs(g, 0, env.obs_config)["vec"][-1]
+    assert m > 0
+    opp.pos = (22, 14)  # 2 tiles from my trail, I'm 6 from home: cut off
+    m = build_obs(g, 0, env.obs_config)["vec"][-1]
+    assert m < 0
+
+
+def test_big_crowd_on_small_board_shrinks_instead_of_crashing():
+    env = SplixEnv(size=20, opponents=["loop"], n_opponents=4, size_range=(20, 22), n_opponents_range=(10, 12))
+    env.reset(seed=0)
+    assert 1 <= env.n_opponents < 10
