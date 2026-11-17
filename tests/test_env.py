@@ -71,7 +71,7 @@ def test_align_matches_next_view_for_static_cells():
             if term or trunc:
                 break
             if info["captured"] == 0 and env.game.territory(0) == terr_before:
-                pred = align(torch.tensor(obs["grid"])[None], torch.tensor([a]), "local")[0].numpy()
+                pred = align(torch.tensor(obs["grid"])[None], torch.tensor([a]), env.obs_config)[0].numpy()
                 R = 5
                 # the row/column that just entered the view is unknown in pred; compare the rest
                 inner = (slice(1, None), slice(None))
@@ -254,3 +254,83 @@ def test_territory_rules_respawn_and_target():
     assert info["outcome"] in ("win", "loss", "timeout")
     if info["outcome"] == "win":
         assert info["territory_frac"] >= 0.1
+
+
+def _rich_cfg(**kw):
+    return dict(coarse_factor=3, visible_radius=25, threat_features=True, minimap=True, **kw)
+
+
+def test_rich_observation_shapes_and_contents():
+    env = SplixEnv(size=40, opponents=["loop"], n_opponents=3, **_rich_cfg())
+    obs, _ = env.reset(seed=3)
+    cfg = env.obs_config
+    assert obs["grid"].shape == (6 + 6 + 2, 15, 15) and env.observation_space.contains(obs)
+    assert len(obs["vec"]) == 11 + 3 + 4
+    # minimap: my position is marked once, and my start square shows up as land
+    assert obs["grid"][13].sum() == 1
+    assert obs["grid"][12].sum() >= 1
+    # coarse wall channel sees the board edge from far away (45x45 window on a 40x40 board)
+    assert obs["grid"][6 + 5].sum() > 0
+    check_env(env, skip_render_check=True)
+    assert cfg.rotating_channels == 12 and cfg.fine_channels == 6
+
+
+def test_visibility_hides_far_opponents():
+    env = SplixEnv(size=60, opponents=["random_safe"], visible_radius=5)
+    env.reset(seed=0)
+    me, opp = env.game.players
+    me.pos, opp.pos = (30, 30), (30, 50)  # 20 tiles away
+    obs = build_obs(env.game, 0, env.obs_config)
+    assert obs["vec"][6] == 2.0  # opp_dist = FAR: not visible
+    opp.pos = (30, 33)
+    obs = build_obs(env.game, 0, env.obs_config)
+    assert obs["vec"][6] < 1.0
+
+
+def test_threat_features_see_enemy_trail_on_my_land():
+    env = SplixEnv(size=20, opponents=["random_safe"], threat_features=True)
+    env.reset(seed=0)
+    me = env.game.players[0]
+    r, c = me.pos
+    base = build_obs(env.game, 0, env.obs_config)["vec"]
+    env.game.trail[r - 1, c - 1] = 1  # an enemy trail cell inside my start square
+    obs = build_obs(env.game, 0, env.obs_config)["vec"]
+    i = 11 + 1  # enemy_trail_on_my_land
+    assert obs[i] > base[i]
+    assert obs[i + 1] < 0.2  # enemy trail is 2 tiles from my head
+
+
+def test_dyna_trains_with_rich_observations(tmp_path):
+    env = SplixEnv(size=24, opponents=["loop"], **_rich_cfg())
+    obs, _ = env.reset(seed=0)
+    agent = DynaAgent(env.obs_config, env.observation_space["grid"].shape, env.observation_space["vec"].shape[0])
+    from splixrl.agents.dyna import ReplayBuffer
+
+    buf = ReplayBuffer(256, env.observation_space["grid"].shape, env.observation_space["vec"].shape[0])
+    for _ in range(80):
+        a = agent.act(obs, deterministic=False, epsilon=0.5)
+        nobs, r, term, trunc, _ = env.step(a)
+        buf.add(obs["grid"], obs["vec"], a, r, nobs["grid"], nobs["vec"], float(term))
+        obs = nobs if not (term or trunc) else env.reset()[0]
+    agent.q_update(buf.sample(16, "cpu"))
+    agent.model_update(buf.sample(16, "cpu"), with_metrics=True)
+    path = tmp_path / "a.pt"
+    agent.save(str(path))
+    assert load_agent(str(path)).obs_config == env.obs_config
+
+
+def test_live_minimap_decode():
+    import struct
+
+    from splixrl.live import LiveState
+
+    st = LiveState()
+    st.handle(bytes([12]) + struct.pack(">H", 100), 0.0)
+    bits = np.zeros(20 * 80, np.uint8)
+    bits[5 * 80 + 10] = 1  # strip 1, column 5 -> minimap x = 25, y = 10
+    st.handle(bytes([14, 1]) + np.packbits(bits, bitorder="little").tobytes(), 0.0)
+    assert st.minimap[10, 25] and st.minimap.sum() == 1
+    hint = st.land_hint()  # board 98x98; minimap tile (25,10) covers arena x 31..32, y 12..13
+    assert hint.shape == (98, 98) and hint.any()
+    rows, cols = np.nonzero(hint)
+    assert set(rows + 1) <= {12, 13, 14} and set(cols + 1) <= {31, 32, 33}

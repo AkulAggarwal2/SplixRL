@@ -50,6 +50,8 @@ C_UPDATE_MY_POS, C_SET_USERNAME, C_SKIN, C_READY, C_PING = 1, 2, 3, 4, 7
 S_PLAYER_STATE, S_FILL_RECT, S_SET_PLAYER_TRAIL, S_PLAYER_DIE = 2, 3, 4, 5
 S_REMOVE_PLAYER, S_MY_SCORE, S_MAP_SIZE, S_GAME_OVER, S_PLAYER_SKIN = 7, 9, 12, 13, 15
 S_EMPTY_TRAIL, S_READY, S_UNDO_PLAYER_DIE = 16, 17, 22
+S_MINIMAP = 14
+MINIMAP_SIZE, MINIMAP_PART_W = 80, 20  # 80x80 bitmap of "anyone's land", sent as 4 strips of 20 columns
 
 TILE_WALL, TILE_EMPTY = 0, 1  # other tile values are skin colour + 2
 DEATH_TYPES = {0: "unknown", 1: "player", 2: "arena-bounds", 3: "self"}
@@ -105,6 +107,7 @@ class LiveState:
         self.ready = False
         self.game_over: dict | None = None
         self.my_states: list[tuple[float, int, int, int]] = []  # every state update the server sent about us
+        self.minimap = np.zeros((MINIMAP_SIZE, MINIMAP_SIZE), bool)  # [y, x]
 
     # -- messages ---------------------------------------------------------
     def handle(self, m: bytes, now: float) -> None:
@@ -159,12 +162,29 @@ class LiveState:
             self.score_tiles, self.kills = struct.unpack(">IH", m[1:7])
         elif t == S_READY:
             self.ready = True
+        elif t == S_MINIMAP:
+            self.handle_minimap(m[1], m[2:])
         elif t == S_GAME_OVER:
             tiles, kills, rank, alive_s, first_s, death = struct.unpack(">IHHIIB", m[1:18])
             self.game_over = {
                 "tiles": tiles, "kills": kills, "best_rank": rank, "seconds_alive": alive_s,
                 "death": DEATH_TYPES.get(death, str(death)), "killed_by": m[18:].decode(errors="replace"),
             }
+
+    def handle_minimap(self, part: int, data: bytes) -> None:
+        """Bits are column-major within the strip: index i -> (x = i // 80, y = i % 80)."""
+        bits = np.unpackbits(np.frombuffer(data, np.uint8), bitorder="little")[: MINIMAP_PART_W * MINIMAP_SIZE]
+        cols = bits.reshape(MINIMAP_PART_W, MINIMAP_SIZE)  # [x, y]
+        x0 = part * MINIMAP_PART_W
+        self.minimap[:, x0 : x0 + MINIMAP_PART_W] = cols.T.astype(bool)
+
+    def land_hint(self) -> np.ndarray:
+        """The minimap scaled to the playable board ([row, col]), for the agent's minimap channel."""
+        W = self.map_size
+        n = W - 2
+        # board cell (r, c) is arena tile (x = c + 1, y = r + 1); the minimap samples tile floor(i * W / 80)
+        idx = np.minimum((np.arange(1, n + 1) * MINIMAP_SIZE) // W, MINIMAP_SIZE - 1)
+        return self.minimap[np.ix_(idx, idx)]
 
     def _ensure_tiles(self, size: int) -> None:
         if self.tiles is None or self.tiles.shape[0] < size:
@@ -186,6 +206,7 @@ class LiveState:
         g.owner[(tiles >= 2) & ~mine] = 1
         g.trail.fill(EMPTY)
         g.t = min(steps, max_steps)
+        g.land_hint = self.land_hint()  # far-away land the client only knows from the minimap
 
         def to_rc(x, y):
             return y - 1, x - 1

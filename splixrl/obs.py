@@ -13,11 +13,28 @@ board size, so an agent trained on 20x20 can play on 32x32.
 ``global``: the whole board, not rotated. The heading is given in ``vec``.
 
 Both return ``{"grid": float32 (C, H, W) of 0/1, "vec": float32 (K,)}``.
+
+Options for big, crowded maps (local mode; all off by default, so older
+checkpoints keep their exact inputs):
+
+* ``coarse_factor = k``: six more channels showing a window k times wider
+  (side W*k, max-pooled down to W x W), rotated like the fine view. With W = 15
+  and k = 3 that is 45 x 45 tiles, about what a human sees on the real server.
+* ``visible_radius = r``: opponents (their land, trails and heads) more than r
+  tiles away (Chebyshev) are invisible, as on the real server, which only sends
+  what is within 25 tiles. Applies to the grid and to ``vec``.
+* ``threat_features``: three more ``vec`` numbers: how close the nearest
+  enemy head is to my land, how much enemy trail lies on my land (a threat,
+  and a free kill: you can't die on your own land), and the distance from my
+  head to the nearest enemy trail.
+* ``minimap``: two more channels with the real game's minimap: which parts of
+  the whole board are anyone's land (it doesn't say whose), and where I am.
+  North-up, not rotated, so the heading is added to ``vec``.
 """
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 
 import numpy as np
 from gymnasium import spaces
@@ -25,6 +42,8 @@ from gymnasium import spaces
 from .game import DIRS, EMPTY, SplixGame
 
 LOCAL_CHANNELS = ("own_territory", "own_trail", "opp_territory", "opp_trail", "opp_heads", "wall")
+COARSE_CHANNELS = tuple("coarse_" + c for c in LOCAL_CHANNELS)
+MINIMAP_CHANNELS = ("map_land", "map_me")
 GLOBAL_CHANNELS = ("own_territory", "own_trail", "own_head", "opp_territory", "opp_trail", "opp_heads")
 VEC_FEATURES = (
     "in_own_territory",
@@ -39,42 +58,77 @@ VEC_FEATURES = (
     "danger_dist",
     "time_frac",
 )
-GLOBAL_EXTRA_VEC = ("heading_up", "heading_right", "heading_down", "heading_left")
+THREAT_FEATURES = ("home_threat_dist", "enemy_trail_on_my_land", "enemy_trail_dist")
+HEADING_FEATURES = ("heading_up", "heading_right", "heading_down", "heading_left")
+GLOBAL_EXTRA_VEC = HEADING_FEATURES
 
 # Distances are divided by a fixed constant (not the board size) so features
 # mean the same thing on every board size.
 DIST_NORM = 32.0
 FAR = 2.0  # value used when there is nothing to measure (e.g. no opponent)
+SERVER_VIEW = 25  # the real server sends players and tiles within this many tiles
 
 
 @dataclass(frozen=True)
 class ObsConfig:
     mode: str = "local"
     view_radius: int = 7
+    coarse_factor: int = 0
+    visible_radius: int | None = None
+    threat_features: bool = False
+    minimap: bool = False
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
             raise ValueError(f"unknown obs mode {self.mode!r}")
+        if self.mode == "global" and (self.coarse_factor or self.minimap):
+            raise ValueError("coarse_factor and minimap are for local mode")
 
     def to_dict(self) -> dict:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ObsConfig":
-        return cls(**d)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+    @property
+    def width(self) -> int:
+        return 2 * self.view_radius + 1
 
     @property
     def channels(self) -> tuple[str, ...]:
-        return LOCAL_CHANNELS if self.mode == "local" else GLOBAL_CHANNELS
+        if self.mode == "global":
+            return GLOBAL_CHANNELS
+        ch = LOCAL_CHANNELS
+        if self.coarse_factor:
+            ch += COARSE_CHANNELS
+        if self.minimap:
+            ch += MINIMAP_CHANNELS
+        return ch
+
+    @property
+    def fine_channels(self) -> int:
+        """Channels that shift one cell per move (the rest only rotate, or neither)."""
+        return len(LOCAL_CHANNELS) if self.mode == "local" else len(GLOBAL_CHANNELS)
+
+    @property
+    def rotating_channels(self) -> int:
+        """Leading channels that rotate with the heading (fine + coarse)."""
+        return self.fine_channels + (len(COARSE_CHANNELS) if self.coarse_factor else 0)
 
     @property
     def vec_features(self) -> tuple[str, ...]:
-        return VEC_FEATURES if self.mode == "local" else VEC_FEATURES + GLOBAL_EXTRA_VEC
+        v = VEC_FEATURES
+        if self.threat_features:
+            v += THREAT_FEATURES
+        if self.mode == "global" or self.minimap:
+            v += HEADING_FEATURES
+        return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
         if self.mode == "local":
-            w = 2 * self.view_radius + 1
-            return (len(LOCAL_CHANNELS), w, w)
+            return (len(self.channels), self.width, self.width)
         return (len(GLOBAL_CHANNELS), board_size, board_size)
 
     def space(self, board_size: int) -> spaces.Dict:
@@ -93,7 +147,24 @@ def egocentric(delta_rc: np.ndarray, heading: int) -> tuple[float, float]:
     return float(delta_rc @ fwd), float(delta_rc @ right)
 
 
-def _vec_features(game: SplixGame, pid: int, own: np.ndarray) -> list[float]:
+def _visible_mask(game: SplixGame, pos: tuple[int, int], radius: int | None) -> np.ndarray | None:
+    if radius is None:
+        return None
+    r, c = pos
+    m = np.zeros((game.size, game.size), bool)
+    m[max(0, r - radius) : r + radius + 1, max(0, c - radius) : c + radius + 1] = True
+    return m
+
+
+def _min_dist(a: np.ndarray, b: np.ndarray) -> float | None:
+    """Smallest Manhattan distance between two sets of (row, col) points."""
+    if not len(a) or not len(b):
+        return None
+    return float(np.abs(a[:, None, :] - b[None, :, :]).sum(2).min())
+
+
+def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
+                  visible: np.ndarray | None, enemy_trail: np.ndarray) -> list[float]:
     p = game.players[pid]
     pos = np.array(p.pos)
     size = game.size
@@ -110,7 +181,10 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray) -> list[float]:
         f, r = egocentric(cells[i] - pos, p.heading)
         home = (d[i] / DIST_NORM, f / DIST_NORM, r / DIST_NORM)
 
-    opp_heads = np.array([q.pos for q in game.players if q.alive and q.pid != pid]).reshape(-1, 2)
+    opp_heads = [q.pos for q in game.players if q.alive and q.pid != pid]
+    if visible is not None:
+        opp_heads = [h for h in opp_heads if visible[h]]
+    opp_heads = np.array(opp_heads).reshape(-1, 2)
     if len(opp_heads):
         d = np.abs(opp_heads - pos).sum(1)
         i = int(d.argmin())
@@ -120,11 +194,8 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray) -> list[float]:
         opp = (FAR, 0.0, 0.0)
 
     # how close the nearest opponent head is to any cell of my trail
-    if p.trail and len(opp_heads):
-        tr = np.array(p.trail)
-        danger = np.abs(tr[:, None, :] - opp_heads[None, :, :]).sum(2).min() / DIST_NORM
-    else:
-        danger = FAR
+    danger = _min_dist(np.array(p.trail).reshape(-1, 2), opp_heads)
+    danger = FAR if danger is None else danger / DIST_NORM
 
     time_frac = game.t / game.max_steps if game.max_steps else 0.0
     vals = [
@@ -136,34 +207,93 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray) -> list[float]:
         danger,
         time_frac,
     ]
+    if cfg.threat_features:
+        own_cells = np.argwhere(own)
+        # only the edge of my land matters for "how close is an enemy"
+        if len(own_cells) > 400:
+            edge = own & ~(np.roll(own, 1, 0) & np.roll(own, -1, 0) & np.roll(own, 1, 1) & np.roll(own, -1, 1))
+            own_cells = np.argwhere(edge)
+        threat = _min_dist(own_cells, opp_heads)
+        on_land = int(np.count_nonzero(enemy_trail & own))
+        etrail = _min_dist(np.argwhere(enemy_trail), pos[None, :])
+        vals += [
+            FAR if threat is None else threat / DIST_NORM,
+            on_land / DIST_NORM,
+            FAR if etrail is None else etrail / DIST_NORM,
+        ]
+    if cfg.mode == "global" or cfg.minimap:
+        heading = [0.0] * 4
+        heading[p.heading] = 1.0
+        vals += heading
     return [float(np.clip(v, -FAR, FAR)) for v in vals]
+
+
+def _window(planes: np.ndarray, pos: tuple[int, int], radius: int, size: int) -> np.ndarray:
+    """(C, 2r+1, 2r+1) crop around pos from board planes; off-board is wall (last channel)."""
+    C = planes.shape[0]
+    padded = np.zeros((C, size + 2 * radius, size + 2 * radius), np.float32)
+    padded[-1] = 1.0
+    padded[:, radius : radius + size, radius : radius + size] = planes
+    r, c = pos
+    return padded[:, r : r + 2 * radius + 1, c : c + 2 * radius + 1]
+
+
+def minimap_planes(game: SplixGame, pid: int, w: int) -> np.ndarray:
+    """(2, w, w): anyone's land on a w x w sampling of the board, and my position.
+
+    Uses ``game.land_hint`` (from the real server's minimap) where present.
+    """
+    n = game.size
+    land = game.owner != EMPTY
+    hint = getattr(game, "land_hint", None)
+    if hint is not None:
+        land = land | hint
+    idx = np.minimum(((np.arange(w) + 0.5) * n / w).astype(int), n - 1)
+    out = np.zeros((2, w, w), np.float32)
+    out[0] = land[np.ix_(idx, idx)]
+    p = game.players[pid]
+    if p.alive:
+        out[1][min(w - 1, p.pos[0] * w // n), min(w - 1, p.pos[1] * w // n)] = 1.0
+    return out
 
 
 def build_obs(game: SplixGame, pid: int, cfg: ObsConfig) -> dict[str, np.ndarray]:
     p = game.players[pid]
     owner, trail = game.owner, game.trail
     own = owner == pid
-    vec = _vec_features(game, pid, own)
+    visible = _visible_mask(game, p.pos, cfg.visible_radius)
+    enemy_trail = (trail != EMPTY) & (trail != pid)
+    if visible is not None:
+        enemy_trail = enemy_trail & visible
+    vec = _vec_features(game, pid, own, cfg, visible, enemy_trail)
 
     if cfg.mode == "local":
-        R = cfg.view_radius
-        planes = np.zeros((len(LOCAL_CHANNELS), game.size + 2 * R, game.size + 2 * R), np.float32)
-        inner = (slice(None), slice(R, R + game.size), slice(R, R + game.size))
-        board = planes[inner]
+        board = np.zeros((len(LOCAL_CHANNELS), game.size, game.size), np.float32)
         board[0] = own
         board[1] = trail == pid
         board[2] = (owner != EMPTY) & ~own
-        board[3] = (trail != EMPTY) & (trail != pid)
+        board[3] = enemy_trail
         for q in game.players:
             if q.alive and q.pid != pid:
                 board[4][q.pos] = 1.0
-        planes[5] = 1.0
-        board[5] = 0.0
-        r, c = p.pos
-        window = planes[:, r : r + 2 * R + 1, c : c + 2 * R + 1]
+        if visible is not None:
+            board[2:5] *= visible
+        R = cfg.view_radius
+        parts = [_window(board, p.pos, R, game.size)]
+        if cfg.coarse_factor:
+            k = cfg.coarse_factor
+            w = cfg.width
+            big = _window(board, p.pos, (w * k) // 2, game.size)[:, : w * k, : w * k]
+            if big.shape[1] < w * k:  # odd/even edge case: pad to a multiple of k
+                pad = np.zeros((big.shape[0], w * k, w * k), np.float32)
+                pad[:, : big.shape[1], : big.shape[2]] = big
+                big = pad
+            parts.append(big.reshape(big.shape[0], w, k, w, k).max(axis=(2, 4)))
         # rotate so the heading points up: k quarter turns counter-clockwise
-        grid = np.ascontiguousarray(np.rot90(window, k=p.heading, axes=(1, 2)))
-        return {"grid": grid, "vec": np.array(vec, np.float32)}
+        grid = np.concatenate([np.rot90(x, k=p.heading, axes=(1, 2)) for x in parts], 0)
+        if cfg.minimap:
+            grid = np.concatenate([grid, minimap_planes(game, pid, cfg.width)], 0)
+        return {"grid": np.ascontiguousarray(grid), "vec": np.array(vec, np.float32)}
 
     grid = np.zeros((len(GLOBAL_CHANNELS), game.size, game.size), np.float32)
     grid[0] = own
@@ -171,10 +301,10 @@ def build_obs(game: SplixGame, pid: int, cfg: ObsConfig) -> dict[str, np.ndarray
     if p.alive:
         grid[2][p.pos] = 1.0
     grid[3] = (owner != EMPTY) & ~own
-    grid[4] = (trail != EMPTY) & (trail != pid)
+    grid[4] = enemy_trail
     for q in game.players:
-        if q.alive and q.pid != pid:
+        if q.alive and q.pid != pid and (visible is None or visible[q.pos]):
             grid[5][q.pos] = 1.0
-    heading = [0.0] * 4
-    heading[p.heading] = 1.0
-    return {"grid": grid, "vec": np.array(vec + heading, np.float32)}
+    if visible is not None:
+        grid[3] *= visible
+    return {"grid": grid, "vec": np.array(vec, np.float32)}

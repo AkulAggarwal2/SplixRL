@@ -140,30 +140,51 @@ def pick_device(name: str = "auto") -> str:
     return "cpu"
 
 
-def align(grid: torch.Tensor, action: torch.Tensor, mode: str) -> torch.Tensor:
-    """Move the current egocentric view to where the next one will be.
-
-    Shift one cell in the direction of travel (cells leaving the view are
-    dropped, entering cells are 0 = unknown), then rotate so the new heading
-    points up. Global views are returned unchanged.
-    """
-    if mode != "local":
-        return grid
+def _shift_rotate(grid: torch.Tensor, action: torch.Tensor, shift: bool) -> torch.Tensor:
     out = torch.zeros_like(grid)
     s = action == STRAIGHT
     if s.any():  # new[i, j] = old[i - 1, j]
-        out[s, :, 1:, :] = grid[s, :, :-1, :]
+        if shift:
+            out[s, :, 1:, :] = grid[s, :, :-1, :]
+        else:
+            out[s] = grid[s]
     l = action == TURN_LEFT
     if l.any():  # shift: new[i, j] = old[i, j - 1]; then left -> up (clockwise)
-        sh = torch.zeros_like(grid[l])
-        sh[:, :, :, 1:] = grid[l, :, :, :-1]
+        sh = torch.zeros_like(grid[l]) if shift else grid[l]
+        if shift:
+            sh[:, :, :, 1:] = grid[l, :, :, :-1]
         out[l] = torch.rot90(sh, k=3, dims=(2, 3))
     r = action == TURN_RIGHT
     if r.any():  # shift: new[i, j] = old[i, j + 1]; then right -> up (counter-clockwise)
-        sh = torch.zeros_like(grid[r])
-        sh[:, :, :, :-1] = grid[r, :, :, 1:]
+        sh = torch.zeros_like(grid[r]) if shift else grid[r]
+        if shift:
+            sh[:, :, :, :-1] = grid[r, :, :, 1:]
         out[r] = torch.rot90(sh, k=1, dims=(2, 3))
     return out
+
+
+def align(grid: torch.Tensor, action: torch.Tensor, cfg) -> torch.Tensor:
+    """Move the current egocentric view to where the next one will be.
+
+    Fine channels shift one cell in the direction of travel (cells leaving the
+    view are dropped, entering cells are 0 = unknown), then rotate so the new
+    heading points up. Coarse channels only rotate (a one-tile move is a third
+    of a coarse cell); minimap channels are north-up and stay as they are.
+    Global views are returned unchanged. ``cfg`` is an ObsConfig (or "local" /
+    "global" for the plain six-channel views).
+    """
+    if isinstance(cfg, str):
+        mode, fine, rot = cfg, grid.shape[1], grid.shape[1]
+    else:
+        mode, fine, rot = cfg.mode, cfg.fine_channels, cfg.rotating_channels
+    if mode != "local":
+        return grid
+    parts = [_shift_rotate(grid[:, :fine], action, shift=True)]
+    if rot > fine:
+        parts.append(_shift_rotate(grid[:, fine:rot], action, shift=False))
+    if grid.shape[1] > rot:
+        parts.append(grid[:, rot:])
+    return torch.cat(parts, 1) if len(parts) > 1 else parts[0]
 
 
 # ---------------------------------------------------------------- buffers
@@ -295,7 +316,7 @@ class DynaAgent(Agent):
 
     def model_update(self, batch, with_metrics: bool = False) -> dict[str, float]:
         grid, vec, action, reward, ngrid, nvec, done = batch
-        logits, pvec, prew, pdone = self.model(align(grid, action, self.obs_config.mode), vec, action)
+        logits, pvec, prew, pdone = self.model(align(grid, action, self.obs_config), vec, action)
         alive = 1.0 - done  # the obs after a death says nothing useful; only learn "done" there
         grid_loss = (F.binary_cross_entropy_with_logits(logits, ngrid, reduction="none").mean((1, 2, 3)) * alive).sum() / alive.sum().clamp(min=1)
         vec_loss = (((pvec - nvec) ** 2).mean(1) * alive).sum() / alive.sum().clamp(min=1)
@@ -312,7 +333,7 @@ class DynaAgent(Agent):
             pred = (logits > 0).float()
             mask = alive[:, None, None, None].bool().expand_as(pred)
             err = (pred != ngrid)[mask].float().mean().item() if mask.any() else 0.0
-            changed = (ngrid != align(grid, action, self.obs_config.mode)) & mask
+            changed = (ngrid != align(grid, action, self.obs_config)) & mask
             changed_err = (pred != ngrid)[changed].float().mean().item() if changed.any() else 0.0
             done_acc = ((pdone > 0).float() == done).float().mean().item()
         return {
@@ -335,7 +356,7 @@ class DynaAgent(Agent):
             action = self.q(grid, vec).argmax(1)
             explore = torch.as_tensor(self.rng.random(len(grid)) < epsilon, device=self.device)
             action = torch.where(explore, torch.randint(0, N_ACTIONS, action.shape, device=self.device), action)
-            logits, nvec, rew, done_logit = self.model(align(grid, action, self.obs_config.mode), vec, action)
+            logits, nvec, rew, done_logit = self.model(align(grid, action, self.obs_config), vec, action)
             probs = torch.sigmoid(logits)
             ngrid = torch.bernoulli(probs) if c.model_sample == "bernoulli" else (probs > 0.5).float()
             done = (torch.sigmoid(done_logit) > 0.5).float()

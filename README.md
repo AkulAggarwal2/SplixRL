@@ -49,6 +49,17 @@ Everything happens on a square grid, and all players move at once each step.
 
 `obs_mode="global"` gives the whole board instead.
 
+**Options for big, crowded maps** (local mode, all off by default):
+
+| option | adds | why |
+|---|---|---|
+| `--coarse-factor 3` | 6 channels: a 45×45-tile window max-pooled to 15×15 | a human sees about 50×50 tiles on the real server; the fine view is only 15×15 |
+| `--visible-radius 25` | hides opponents more than 25 tiles away, in the grid and in `vec` | the real server only sends what's within 25 tiles, so without this the agent trains with information it won't have |
+| `--threat-features` | 3 `vec` numbers: nearest enemy head to my land, enemy trail cells on my land, distance to the nearest enemy trail | defending land (stolen cells cost reward), and an enemy trail on your land is a free kill |
+| `--minimap` | 2 channels: anyone's land on the whole board, and my position, north-up; heading added to `vec` | the real minimap: an 80×80 bitmap of occupied land, decoded by `live.py` |
+
+The world model shifts and rotates the fine channels, only rotates the coarse ones, and leaves the minimap alone.
+
 **Reward** (`RewardConfig`, the same for every algorithm):
 * +0.1 per cell captured
 * +3 per kill
@@ -115,6 +126,17 @@ POOL="random_safe loop chaser frozen:runs/round0/dyna/seed0/agent.pt frozen:runs
 python -m splixrl.train_dyna --run-dir runs/round1/dyna/seed0 --opponents $POOL
 python -m splixrl.evaluate --actors runs/round1/*/seed0/agent.pt --opponents $POOL --pivot win_rate
 ```
+
+### Runs toward the real game
+
+`runs/territory40/dyna/seed0` uses:
+* 40×40 board, 4 opponents from the bot pool;
+* territory rules: respawn, win at 50% of the map, 1500 steps;
+* all four options above;
+* `--lag-prob 0.05` and reward v2;
+* 300k steps.
+
+This is the first agent trained with roughly what a player has on the real server.
 
 ### Problems found so far
 

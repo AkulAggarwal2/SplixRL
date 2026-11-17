@@ -62,6 +62,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--opponents", nargs="+", default=list(DEFAULT_POOL), help="training pool (bots or frozen:<path>)")
     p.add_argument("--obs-mode", default="local", choices=["local", "global"])
     p.add_argument("--view-radius", type=int, default=7)
+    p.add_argument("--coarse-factor", type=int, default=0, help="add a k-times-wider pooled view (3 = 45x45 tiles)")
+    p.add_argument("--visible-radius", type=int, default=None, help="hide opponents beyond this many tiles (server: 25)")
+    p.add_argument("--threat-features", action="store_true", help="add enemy-near-my-land features")
+    p.add_argument("--minimap", action="store_true", help="add the real game's minimap channels")
     p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
     p.add_argument("--respawn-delay", type=int, default=10)
     p.add_argument("--target-frac", type=float, default=None, help="territory rules: win at this share of the map")
@@ -96,6 +100,10 @@ def train(args: argparse.Namespace) -> Path:
         spawn_radius=args.spawn_radius,
         obs_mode=args.obs_mode,
         view_radius=args.view_radius,
+        coarse_factor=args.coarse_factor,
+        visible_radius=args.visible_radius,
+        threat_features=args.threat_features,
+        minimap=args.minimap,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
         respawn=args.respawn,

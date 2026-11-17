@@ -57,6 +57,10 @@ class SplixEnv(gym.Env):
         respawn: bool = False,
         respawn_delay: int = 10,
         target_frac: float | None = None,
+        coarse_factor: int = 0,
+        visible_radius: int | None = None,
+        threat_features: bool = False,
+        minimap: bool = False,
     ):
         if not opponents and n_opponents:
             raise ValueError("opponent pool is empty")
@@ -64,7 +68,10 @@ class SplixEnv(gym.Env):
         self.pool = list(opponents)
         self.n_opponents = n_opponents
         self.max_steps = max_steps
-        self.obs_config = ObsConfig(mode=obs_mode, view_radius=view_radius)
+        self.obs_config = ObsConfig(
+            mode=obs_mode, view_radius=view_radius, coarse_factor=coarse_factor,
+            visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
+        )
         self.reward_config = reward if isinstance(reward, RewardConfig) else RewardConfig.from_dict(reward)
         self.render_mode = render_mode
         # Network lag, as on the real server: with this probability a turn the
@@ -93,6 +100,10 @@ class SplixEnv(gym.Env):
             spawn_radius=self.game.spawn_radius,
             obs_mode=self.obs_config.mode,
             view_radius=self.obs_config.view_radius,
+            coarse_factor=self.obs_config.coarse_factor,
+            visible_radius=self.obs_config.visible_radius,
+            threat_features=self.obs_config.threat_features,
+            minimap=self.obs_config.minimap,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
             respawn=self.respawn,
