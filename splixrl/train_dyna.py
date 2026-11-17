@@ -72,6 +72,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--size-features", action="store_true", help="add my-size vs nearest-enemy-size features")
     p.add_argument("--reclaim-features", action="store_true", help="add features for cheap land to take back")
     p.add_argument("--escape-features", action="store_true", help="add the escape margin (enemy reach - my way home)")
+    p.add_argument("--allow-pause", action="store_true", help="a 4th action: stop moving, as on the real server")
+    p.add_argument("--max-pause", type=int, default=20, help="most steps in a row the agent may stay paused")
     p.add_argument("--respawn", action="store_true", help="territory rules: dead opponents come back")
     p.add_argument("--respawn-delay", type=int, default=10)
     p.add_argument("--target-frac", type=float, default=None, help="territory rules: win at this share of the map")
@@ -94,10 +96,42 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval-episodes", type=int, default=20)
     p.add_argument("--log-every", type=int, default=2_000)
     add_dataclass_args(p, DynaConfig)
-    p.add_argument("--reward-preset", choices=["v1", "v2", "score"], default="v1",
+    p.add_argument("--reward-preset", choices=["v1", "v2", "score", "score_rank"], default="v1",
                    help="starting reward settings; --reward-* flags override single values")
     add_dataclass_args(p, RewardConfig, prefix="reward-")
     return p
+
+
+def load_extended(module: torch.nn.Module, state: dict, exact_only: bool = False) -> list[str]:
+    """Load a checkpoint into a network whose inputs or outputs grew.
+
+    Same-shape tensors are copied. A weight with more input columns (new
+    ``vec`` features, which are always appended last) gets the old columns and
+    zeros for the new ones, so it computes the same function as before. A
+    layer with more outputs (a new action) keeps fresh weights for the new
+    rows. With ``exact_only`` mismatched tensors keep their fresh values.
+    """
+    notes = []
+    own = module.state_dict()
+    for name, new in own.items():
+        old = state.get(name)
+        if old is None:
+            notes.append(f"{name}: new")
+            continue
+        if old.shape == new.shape:
+            own[name] = old.clone()
+            continue
+        if exact_only or old.dim() != new.dim() or any(o > n for o, n in zip(old.shape, new.shape)):
+            notes.append(f"{name}: fresh {tuple(new.shape)}")
+            continue
+        grown = new.clone()
+        if old.dim() == 2 and old.shape[1] < new.shape[1]:
+            grown[:, old.shape[1]:] = 0.0  # new inputs start with no influence
+        grown[tuple(slice(0, d) for d in old.shape)] = old
+        own[name] = grown
+        notes.append(f"{name}: {tuple(old.shape)} -> {tuple(new.shape)}")
+    module.load_state_dict(own)
+    return notes
 
 
 def linear_eps(step: int, total: int, cfg: DynaConfig) -> float:
@@ -109,6 +143,7 @@ def train(args: argparse.Namespace) -> Path:
     run = Path(args.run_dir)
     (run / "checkpoints").mkdir(parents=True, exist_ok=True)
     cfg = dataclass_from_args(DynaConfig, args)
+    cfg.n_actions = 4 if args.allow_pause else 3
     reward = RewardConfig.preset(args.reward_preset)
     for k, v in vars(dataclass_from_args(RewardConfig, args, prefix="reward_")).items():
         if getattr(args, "reward_" + k) is not None:  # explicit flags win over the preset
@@ -131,6 +166,8 @@ def train(args: argparse.Namespace) -> Path:
         size_features=args.size_features,
         reclaim_features=args.reclaim_features,
         escape_features=args.escape_features,
+        allow_pause=args.allow_pause,
+        max_pause=args.max_pause,
         reward=reward.to_dict(),
         lag_prob=args.lag_prob,
         respawn=args.respawn,
@@ -161,17 +198,18 @@ def train(args: argparse.Namespace) -> Path:
     torch.manual_seed(args.seed)
     torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
     env = SplixEnv(**env_kwargs)
+    cfg.n_actions = int(env.action_space.n)
     grid_shape = env.observation_space["grid"].shape
     n_vec = env.observation_space["vec"].shape[0]
     agent = DynaAgent(env.obs_config, grid_shape, n_vec, cfg, device=pick_device(args.device), seed=args.seed)
     if args.init_from:  # curriculum: continue from an earlier stage's weights
         ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        agent.q.load_state_dict(ck["q"])
-        agent.q_target.load_state_dict(ck["q"])
+        notes = load_extended(agent.q, ck["q"])
+        agent.q_target.load_state_dict(agent.q.state_dict())
         if "model" in ck:
-            agent.model.load_state_dict(ck["model"])
+            notes += load_extended(agent.model, ck["model"], exact_only=True)
         agent.sync_actor()
-        print(f"initialised from {args.init_from}", flush=True)
+        print(f"initialised from {args.init_from}" + (f" ({'; '.join(notes)})" if notes else ""), flush=True)
     real = ReplayBuffer(cfg.buffer_size, grid_shape, n_vec, seed=args.seed)
     imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1)
 

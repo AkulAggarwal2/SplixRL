@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 from .evaluation import make_actor
-from .game import DOWN, EMPTY, LEFT, RIGHT, UP, Player, SplixGame, turn
+from .game import DOWN, EMPTY, LEFT, PAUSE, RIGHT, STRAIGHT, UP, Player, SplixGame, turn
 from .obs import build_obs
 
 TILE_SEC = 1 / 0.006 / 1000  # seconds per tile (PLAYER_TRAVEL_SPEED in the server config)
@@ -56,6 +56,7 @@ MINIMAP_SIZE, MINIMAP_PART_W = 80, 20  # 80x80 bitmap of "anyone's land", sent a
 MINIMAP_SCALE = 3
 
 TILE_WALL, TILE_EMPTY = 0, 1  # other tile values are skin colour + 2
+MAX_PAUSE = 20  # same cap as training (SplixEnv.max_pause): after this many paused tiles, go
 UNSEEN_OWNER = 120  # snapshot owner id for land whose player isn't in view
 DEATH_TYPES = {0: "unknown", 1: "player", 2: "arena-bounds", 3: "self"}
 
@@ -550,6 +551,8 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
             # (the server then rewinds to that tile), and after a few tries assume it
             # was lost and go back to the straight-line prediction.
             pending: dict | None = None
+            last_heading = SERVER_TO_HEADING.get(state.players[0].dir, UP)
+            paused_for, last_pause_decision = 0, 0.0
             seen_states = len(state.my_states)
             lag = {"turns": 0, "confirmed": 0, "resent": 0, "lost": 0, "corrections": 0}
             while state.game_over is None and not closed.is_set():
@@ -577,9 +580,45 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                             me.trail.pop()
                         pending = None
                 me = state.players[0]
-                if not me.alive or me.dir == 4:
+                if not me.alive:
                     await asyncio.sleep(TILE_SEC / 4)
                     continue
+
+                def choose(game):
+                    nonlocal reset_done, steps
+                    env = _FakeEnv(game, obs_config)
+                    if not reset_done:
+                        actor.reset(env, seed=int(time.time()))
+                        reset_done = True
+                    steps += 1
+                    if hasattr(actor, "bot"):
+                        return int(actor.bot.act(game, 0))
+                    return int(actor.act(env, build_obs(game, 0, obs_config)))
+
+                if me.dir == 4:
+                    # Paused: decide once per tile period, from where we stand.
+                    if now - last_pause_decision >= TILE_SEC:
+                        last_pause_decision = now
+                        game = state.snapshot((me.x, me.y), last_heading, now, steps, max_steps)
+                        game.players[0].paused = True
+                        action = choose(game)
+                        paused_for += 1
+                        if action != PAUSE or paused_for > MAX_PAUSE:
+                            a = STRAIGHT if action == PAUSE else action
+                            sd = HEADING_TO_SERVER[turn(last_heading, a)]
+                            msg = struct.pack(">BbHH", C_UPDATE_MY_POS, sd, me.x, me.y)
+                            await ws.send(msg)
+                            lag["turns"] += 1
+                            before = (me.x, me.y, me.dir, me.t)
+                            me.dir, me.t = sd, now
+                            paused_for = 0
+                            pending = {"pos": (me.x, me.y), "dir": sd, "eta": now, "tries": 1, "msg": msg,
+                                       "before": before, "added_corner": False}
+                        if window is not None and not window.draw(game, state, name, life):
+                            window = None
+                    await asyncio.sleep(TILE_SEC / 10)
+                    continue
+
                 k = int((now - me.t) / TILE_SEC)
                 phase = (now - me.t) / TILE_SEC - k
                 dx, dy = SERVER_DELTA[me.dir]
@@ -592,17 +631,19 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                         await asyncio.sleep(TILE_SEC / 10)  # next tile is the border: nothing left to decide
                         continue
                     heading = SERVER_TO_HEADING[me.dir]
+                    last_heading = heading
                     game = state.snapshot(nxt, heading, now, steps, max_steps)
-                    env = _FakeEnv(game, obs_config)
-                    if not reset_done:
-                        actor.reset(env, seed=int(time.time()))
-                        reset_done = True
-                    if hasattr(actor, "bot"):
-                        action = actor.bot.act(game, 0)
-                    else:
-                        action = actor.act(env, build_obs(game, 0, obs_config))
-                    steps += 1
-                    new_heading = turn(heading, int(action))
+                    action = choose(game)
+                    if action == PAUSE:  # stop on tile nxt
+                        msg = struct.pack(">BbHH", C_UPDATE_MY_POS, 4, nxt[0], nxt[1])
+                        await ws.send(msg)
+                        lag["turns"] += 1
+                        before = (me.x, me.y, me.dir, me.t)
+                        me.x, me.y, me.dir, me.t = nxt[0], nxt[1], 4, t_next
+                        pending = {"pos": nxt, "dir": 4, "eta": t_next, "tries": 1, "msg": msg,
+                                   "before": before, "added_corner": False}
+                        paused_for, last_pause_decision = 1, t_next
+                    new_heading = heading if action == PAUSE else turn(heading, int(action))
                     if new_heading != heading:
                         sd = HEADING_TO_SERVER[new_heading]
                         msg = struct.pack(">BbHH", C_UPDATE_MY_POS, sd, nxt[0], nxt[1])

@@ -32,7 +32,7 @@ from typing import Any, Sequence
 import gymnasium as gym
 import numpy as np
 
-from .game import N_ACTIONS, STRAIGHT, SplixGame
+from .game import N_ACTIONS, N_ACTIONS_WITH_PAUSE, PAUSE, STRAIGHT, SplixGame
 from .obs import ObsConfig, build_obs
 from .opponents import Opponent, make_opponent, opponent_label
 from .render import render_rgb
@@ -65,6 +65,8 @@ class SplixEnv(gym.Env):
         size_features: bool = False,
         reclaim_features: bool = False,
         escape_features: bool = False,
+        allow_pause: bool = False,
+        max_pause: int = 20,
         size_range: tuple[int, int] | None = None,
         n_opponents_range: tuple[int, int] | None = None,
         lag_range: tuple[float, float] | None = None,
@@ -90,8 +92,14 @@ class SplixEnv(gym.Env):
             mode=obs_mode, view_radius=view_radius, coarse_factor=coarse_factor,
             visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
             enemy_heading=enemy_heading, size_features=size_features, reclaim_features=reclaim_features,
-            escape_features=escape_features,
+            escape_features=escape_features, pause_feature=allow_pause,
         )
+        # Pausing (action 3), as the real server allows. max_pause caps how many
+        # steps in a row the agent may stay paused (then it goes straight), so
+        # "stand still forever" can't become a way to avoid all risk.
+        self.allow_pause = allow_pause
+        self.max_pause = max_pause
+        self._paused_for = 0
         self.reward_config = reward if isinstance(reward, RewardConfig) else RewardConfig.from_dict(reward)
         self.render_mode = render_mode
         # Network lag, as on the real server: with this probability a turn the
@@ -105,7 +113,7 @@ class SplixEnv(gym.Env):
         self.game = SplixGame(
             size=size, n_players=1 + n_opponents, spawn_radius=spawn_radius, max_steps=max_steps
         )
-        self.action_space = gym.spaces.Discrete(N_ACTIONS)
+        self.action_space = gym.spaces.Discrete(N_ACTIONS_WITH_PAUSE if allow_pause else N_ACTIONS)
         self.observation_space = self.obs_config.space(size)
         self.opponents: list[Opponent] = []
         self.opponent_names: list[str] = []
@@ -128,6 +136,8 @@ class SplixEnv(gym.Env):
             size_features=self.obs_config.size_features,
             reclaim_features=self.obs_config.reclaim_features,
             escape_features=self.obs_config.escape_features,
+            allow_pause=self.allow_pause,
+            max_pause=self.max_pause,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
             respawn=self.respawn,
@@ -186,6 +196,7 @@ class SplixEnv(gym.Env):
             opp.reset(self.game, i, np.random.default_rng(int(rng.integers(2**63))))
         self._phi = self._potential()
         self._delayed = None
+        self._paused_for = 0
         self._total_captured = 0
         self._peak_territory = self.game.territory(0)
         return self._obs(), self._info()
@@ -194,6 +205,14 @@ class SplixEnv(gym.Env):
         g = self.game
         rc = self.reward_config
         action, lagged = int(action), False
+        if action == PAUSE:
+            if not self.allow_pause:
+                raise ValueError("pausing is off for this env (allow_pause=False)")
+            self._paused_for += 1
+            if self._paused_for > self.max_pause:
+                action = STRAIGHT
+        if action != PAUSE:
+            self._paused_for = 0
         if self._delayed is not None:  # last step's turn finally lands; this step's choice is lost
             action, self._delayed, lagged = self._delayed, None, True
         elif action != STRAIGHT and self.lag_prob > 0 and self.np_random.random() < self.lag_prob:
@@ -237,6 +256,12 @@ class SplixEnv(gym.Env):
             info["won"] = info["outcome"] == "win"
             if info["won"]:
                 r += rc.win
+            if rc.rank_bonus and not agent_dead:
+                mine = g.territory(0)
+                others = [g.territory(p.pid) for p in g.players[1:]]
+                share = sum(o < mine for o in others) / max(1, len(others))
+                info["rank_share"] = share
+                r += rc.rank_bonus * share
         return self._obs(), float(r), terminated, truncated, info
 
     def _respawn_opponents(self) -> None:

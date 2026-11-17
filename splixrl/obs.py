@@ -47,6 +47,8 @@ checkpoints keep their exact inputs):
   basic safety rule of the game: keep it positive, i.e. only go as far out as
   you can get back before anyone can cut you off. Always the last feature, so
   a checkpoint without it can be extended (new input weights start at 0).
+* ``pause_feature``: one more ``vec`` number, 1 while I'm paused (set
+  automatically when the env allows pausing). After the escape margin.
 """
 
 from __future__ import annotations
@@ -103,6 +105,7 @@ class ObsConfig:
     size_features: bool = False
     reclaim_features: bool = False
     escape_features: bool = False
+    pause_feature: bool = False
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
@@ -160,6 +163,8 @@ class ObsConfig:
             v += HEADING_FEATURES
         if self.escape_features:
             v += ESCAPE_FEATURES
+        if self.pause_feature:
+            v += ("paused",)
         return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
@@ -291,6 +296,8 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
             my_way_home = 0.0 if in_own else (home[0] * DIST_NORM if terr else FAR * DIST_NORM)
             margin = (enemy_reach - my_way_home) / DIST_NORM
         vals.append(margin)
+    if cfg.pause_feature:
+        vals.append(float(getattr(p, "paused", False)))
     return [float(np.clip(v, -FAR, FAR)) for v in vals]
 
 

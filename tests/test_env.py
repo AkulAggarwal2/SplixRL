@@ -525,3 +525,89 @@ def test_big_crowd_on_small_board_shrinks_instead_of_crashing():
     env = SplixEnv(size=20, opponents=["loop"], n_opponents=4, size_range=(20, 22), n_opponents_range=(10, 12))
     env.reset(seed=0)
     assert 1 <= env.n_opponents < 10
+
+
+def test_pause_rules():
+    from splixrl.game import PAUSE
+
+    env = SplixEnv(size=20, opponents=["random_safe"], allow_pause=True, max_pause=3)
+    obs, _ = env.reset(seed=0)
+    assert env.action_space.n == 4 and env.obs_config.vec_features[-1] == "paused"
+    me = env.game.players[0]
+    pos, h = me.pos, me.heading
+    obs, *_ = env.step(PAUSE)
+    assert me.pos == pos and me.paused and obs["vec"][-1] == 1.0
+    env.step(PAUSE)
+    env.step(PAUSE)
+    env.step(PAUSE)  # 4th pause in a row: over max_pause, goes straight instead
+    assert me.pos != pos and not me.paused and me.heading == h
+    # a paused player with a trail out can be cut
+    g = env.game
+    me.trail = [me.pos]
+    g.trail[me.pos] = 0
+    me.paused = True
+    opp = g.players[1]
+    r, c = me.pos
+    opp.pos, opp.heading = (r, c - 1) if c > 0 else (r, c + 1), 1 if c > 0 else 3
+    g.owner[opp.pos] = 1
+    g.step([PAUSE, 0])
+    assert not me.alive and me.death_cause == "trail_cut"
+    # without allow_pause the action is refused
+    plain = SplixEnv(size=16)
+    plain.reset(seed=0)
+    with pytest.raises(ValueError):
+        plain.step(PAUSE)
+
+
+def test_dyna_with_pause_and_warm_start_from_three_actions(tmp_path):
+    from splixrl.agents.dyna import ReplayBuffer, align
+    from splixrl.game import PAUSE
+    from splixrl.train_dyna import load_extended
+
+    old_env = SplixEnv(size=16, opponents=["loop"], escape_features=True)
+    new_env = SplixEnv(size=16, opponents=["loop"], escape_features=True, allow_pause=True)
+    old = DynaAgent(old_env.obs_config, old_env.observation_space["grid"].shape, old_env.observation_space["vec"].shape[0])
+    cfg = DynaConfig(n_actions=4)
+    new = DynaAgent(new_env.obs_config, new_env.observation_space["grid"].shape, new_env.observation_space["vec"].shape[0], cfg)
+    load_extended(new.q, old.q.state_dict())
+    obs_new, _ = new_env.reset(seed=1)
+    obs_old = {"grid": obs_new["grid"], "vec": obs_new["vec"][:-1]}
+    g_new, v_new = torch.tensor(obs_new["grid"])[None], torch.tensor(obs_new["vec"])[None]
+    with torch.no_grad():
+        q_old = old.q(g_new, torch.tensor(obs_old["vec"])[None])
+        q_new = new.q(g_new, v_new)
+    assert torch.allclose(q_old, q_new[:, :3], atol=1e-5)  # same values for the old actions
+    # paused rows of align keep the view
+    grid = torch.rand(2, *new_env.observation_space["grid"].shape).round()
+    out = align(grid, torch.tensor([PAUSE, 0]), new_env.obs_config)
+    assert torch.equal(out[0], grid[0])
+    # a few updates with 4 actions work
+    buf = ReplayBuffer(128, new_env.observation_space["grid"].shape, new_env.observation_space["vec"].shape[0])
+    obs = obs_new
+    for _ in range(60):
+        a = new.act(obs, deterministic=False, epsilon=0.7)
+        nobs, r, term, trunc, _ = new_env.step(a)
+        buf.add(obs["grid"], obs["vec"], a, r, nobs["grid"], nobs["vec"], float(term), end=term or trunc)
+        obs = nobs if not (term or trunc) else new_env.reset()[0]
+    new.q_update(buf.sample(16, "cpu"))
+    new.model_update(buf.sample(16, "cpu"), with_metrics=True)
+    new.save(str(tmp_path / "p.pt"))
+    assert load_agent(str(tmp_path / "p.pt")).cfg.n_actions == 4
+
+
+def test_rank_bonus_rewards_finishing_ahead():
+    from splixrl.rewards import RewardConfig
+
+    rc = RewardConfig.preset("score_rank")
+    env = SplixEnv(size=20, opponents=["random_safe"], n_opponents=2, max_steps=3, reward=rc)
+    env.reset(seed=0)
+    g = env.game
+    g.owner[g.owner == 1] = EMPTY  # opponent 1 has almost nothing...
+    g.owner[0, 0] = 1
+    done, ret = False, 0.0
+    while not done:
+        _, r, term, trunc, info = env.step(TURN_RIGHT)  # circle at home
+        ret += r
+        done = term or trunc
+    assert info["alive"] and info["rank_share"] >= 0.5
+    assert ret >= rc.rank_bonus * 0.5 - 1e-6

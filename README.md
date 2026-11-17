@@ -49,6 +49,8 @@ Everything happens on a square grid, and all players move at once each step.
 
 `obs_mode="global"` gives the whole board instead.
 
+**Pausing** (`--allow-pause`, also `python -m splixrl.play --allow-pause` with P): a 4th action that stops the player, as the real server allows. Trails stay where they are, so a paused player with a trail out can still be cut. Any other action resumes relative to the old heading. `--max-pause` caps how long it may stand still. Warm starts (`--init-from`) can grow a 3-action checkpoint into a 4-action one: the old outputs are kept, and new inputs start at zero weight.
+
 **Options for big, crowded maps** (local mode, all off by default):
 
 | option | adds | why |
@@ -83,7 +85,7 @@ Optional extras:
 | 20×20, 1 LoopBot opponent, 1500 steps | 80% of games (peak 195 cells) | 70% |
 | 40×40, 4 LoopBot opponents, 3000 steps | 0% (peak 363 cells ≈ 23%) | 5% |
 
-**Reward presets** (`--reward-preset`): `v1` as above; `v2` adds 0.1 per cell lost on death or stolen. `score` matches the real game's score. The in-game panel ("Kills: 1, Blocks: 3748, Score: 4248") shows a kill is worth 500 tiles, so `score` pays 0.01 per tile and 5 per kill and keeps the loss of land on death. Under v1/v2 a kill was worth only 30 tiles, which is one reason agents rarely went for kills.
+**Reward presets** (`--reward-preset`): `v1` as above; `v2` adds 0.1 per cell lost on death or stolen; `score_rank` is `score` plus an end-of-game bonus (up to 3) for holding more land than the opponents. `score` matches the real game's score. The in-game panel ("Kills: 1, Blocks: 3748, Score: 4248") shows a kill is worth 500 tiles, so `score` pays 0.01 per tile and 5 per kill and keeps the loss of land on death. Under v1/v2 a kill was worth only 30 tiles, which is one reason agents rarely went for kills.
 
 `lag_prob` makes a requested turn land one tile late with that probability, imitating the real server's lag (see "Real game").
 
@@ -96,6 +98,7 @@ Optional extras:
 | `loop` | small rectangular loops away from enemies, heads home when an enemy is within 4 cells |
 | `chaser` | hunts enemy trails within 10 cells, otherwise loops |
 | `invader` | raids the nearest enemy land (drives 4 tiles in, then home), so agents practise noticing and punishing land theft |
+| `hunter` | a chaser that goes after exposed trails up to 20 tiles away |
 | `greedy` | big loops, barely checks for danger: lots of land and long trails to cut. A ChaserBot gets 18.7 kills per game against four of them on 40×40 |
 | `frozen:<path>` | any saved agent, weights frozen, playing from its own seat |
 | `loop?max_out=8&danger_dist=2` | bots take keyword arguments |
@@ -176,13 +179,16 @@ This is the first agent trained with roughly what a player has on the real serve
 3. **Kill farming.** On 40×40 with respawning opponents, the agent learned to sit at home and cut InvaderBots as they raided: 20–25 kills a game, while its land stayed at 30–50 cells. The invaders walked into its land predictably. Fix: invaders abort a raid when an enemy head gets close and don't start one next to an enemy. An agent circling at home now gets 0 kills against them.
 4. **Wall hugging under lag.** An agent trained without lag turns on the last tile before walls: with 5% of turns landing a tile late, it dies to walls in 21 of 30 simulator games (0 of 30 without lag), and in 61 of 100 lives on the real server. Fix: train with `--lag-prob` / `--lag-range`.
 
-### Stage 2: training for the real game
+### Training for the real game
 
-`runs/stage2/dyna/seed0`, 600k steps:
+`runs/realgame/dyna/seed0`, 600k steps (this replaced an earlier stage-2 run that was missing pausing, the rank bonus and the hunter bot):
 * **Every episode is different:** board 24–72 tiles, 2–10 opponents, 0–10% lag, respawning opponents spawned anywhere. Bots draw new loop sizes and caution each life (`?jitter=true`).
 * **Self-play league:** every 25k steps a frozen copy of the agent joins the opponent pool (newest 4 kept).
 * **All observation options,** plus `--escape-features`: the escape margin, (nearest enemy's distance to my trail) − (my distance home). That's the game's basic safety rule.
-* **Learner:** score reward, γ 0.995, 3-step returns, dueling network, soft target, 1 gated planning update.
+* **Pausing** (`--allow-pause`): a 4th action, stop moving, at most 20 steps in a row.
+* **Reward `score_rank`:** the real score (1 per tile, 500 per kill, land lost on death), plus up to 3 at the end for holding more land than the opponents. Creeping along with 1–2-tile loops ends up behind, so it no longer pays.
+* **Hunter bots,** which chase exposed trails from 20 tiles away. Loops too big for how close enemies are get punished, so the escape-margin rule is learned from experience.
+* **Learner:** γ 0.995, 3-step returns, dueling network, soft target, 1 gated planning update.
 * **Evaluation** is fixed at 48×48, 6 opponents, 5% lag, and `best.pt` is chosen by evaluation return (real-score units).
 * `--init-from` can warm-start a stage from an earlier checkpoint with the same inputs.
 

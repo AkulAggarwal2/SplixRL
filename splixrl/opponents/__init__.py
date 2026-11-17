@@ -9,6 +9,8 @@ A spec is a string (or an Opponent factory). String forms:
     "greedy"            LoopBot drawing big loops and ignoring danger until late:
                         lots of land, and long trails to cut (kill practice)
     "invader"           InvaderBot: raids the nearest enemy land and takes it home
+    "hunter"            ChaserBot that goes after exposed trails up to 20 tiles away:
+                        punishes loops that are too big for how close enemies are
     "loop?max_out=8&danger_dist=2"   bot with keyword arguments
     "frozen:path/to/agent.pt"        a saved RL agent, frozen (never updated)
 
@@ -29,6 +31,7 @@ BOTS: dict[str, Callable[..., Opponent]] = {
     "loop": LoopBot,
     "chaser": ChaserBot,
     "invader": InvaderBot,
+    "hunter": lambda **kw: ChaserBot(**{"chase_radius": 20, "chase_max_trail": 45, **kw}),
     "greedy": lambda **kw: LoopBot(**{
         "min_out": 5, "max_out": 12, "min_side": 5, "max_side": 14,
         "danger_dist": 1, "max_trail": 70, "keep_away": 1, **kw,

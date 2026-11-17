@@ -17,6 +17,10 @@ class RewardConfig:
     # loops are no longer free. 0 = flat death penalty only (reward v1).
     death_per_cell: float = 0.0
     win: float = 0.0  # once, if the episode ends in a win
+    # once, when the episode ends with the agent alive: this times the share of
+    # opponents holding less land (1 = ahead of everyone). Being alive but
+    # tiny earns almost nothing, like the real leaderboard; dying earns nothing.
+    rank_bonus: float = 0.0
     step: float = 0.0  # every step (negative = time pressure)
     # Potential-based shaping (Ng, Harada & Russell 1999). The potential is
     # shaping * capture_per_cell * trail_length: it pays a little for
@@ -31,6 +35,8 @@ class RewardConfig:
 
         v1:    +0.1 per cell, +3 per kill, -3 on death.
         v2:    v1, plus dying or having land stolen costs 0.1 per cell.
+        score_rank: score, plus a bonus of up to 3 (300 tiles' worth) at the end for
+               out-holding the opponents, so creeping along with tiny loops loses.
         score: the real game's score -- 1 point per tile, 500 per kill (see the
                in-game "Kills: 1, Blocks: 3748, Score: 4248") -- scaled by 0.01,
                and dying loses the land you hold. Kills are worth 50 cells of
@@ -41,6 +47,8 @@ class RewardConfig:
             "v2": {"death_per_cell": 0.1, "lost_per_cell": 0.1},
             "score": {"capture_per_cell": 0.01, "kill": 5.0, "death": 0.0,
                       "death_per_cell": 0.01, "lost_per_cell": 0.01},
+            "score_rank": {"capture_per_cell": 0.01, "kill": 5.0, "death": 0.0,
+                           "death_per_cell": 0.01, "lost_per_cell": 0.01, "rank_bonus": 3.0},
         }
         if name not in presets:
             raise ValueError(f"unknown reward preset {name!r}; choose from {sorted(presets)}")

@@ -24,6 +24,13 @@ Rules, resolved simultaneously every step:
 
 Trail collisions are checked against trails as they were before the step, so
 a trail includes the cell a player is standing on.
+
+Pausing (action PAUSE, only offered when the env allows it), as on the real
+server: the player stops where it is. Its trail stays where it is, so with a
+trail out it is a sitting target. Any other action resumes, relative to the
+heading it had before pausing, so it can't reverse into its own trail. A
+paused player doesn't take part in head-on collisions; anyone moving onto
+its trail still kills it.
 """
 
 from __future__ import annotations
@@ -37,9 +44,10 @@ UP, RIGHT, DOWN, LEFT = 0, 1, 2, 3
 # (row delta, col delta) for each heading
 DIRS = np.array([(-1, 0), (0, 1), (1, 0), (0, -1)], dtype=np.int64)
 
-STRAIGHT, TURN_LEFT, TURN_RIGHT = 0, 1, 2
-N_ACTIONS = 3
-ACTION_NAMES = ("straight", "left", "right")
+STRAIGHT, TURN_LEFT, TURN_RIGHT, PAUSE = 0, 1, 2, 3
+N_ACTIONS = 3  # without pausing; envs with allow_pause use N_ACTIONS_WITH_PAUSE
+N_ACTIONS_WITH_PAUSE = 4
+ACTION_NAMES = ("straight", "left", "right", "pause")
 
 EMPTY = -1
 
@@ -66,6 +74,7 @@ class Player:
     death_cause: str | None = None
     killed_by: int | None = None
     steps_alive: int = 0
+    paused: bool = False
 
 
 @dataclass
@@ -160,8 +169,11 @@ class SplixGame:
         return 0 <= r < self.size and 0 <= c < self.size
 
     def next_cell(self, pid: int, action: int) -> tuple[tuple[int, int], int]:
-        """Cell a player would move to with this action, and its new heading."""
+        """Cell a player would move to with this action, and its new heading.
+        Pausing stays put."""
         p = self.players[pid]
+        if action == PAUSE:
+            return p.pos, p.heading
         h = turn(p.heading, action)
         return (p.pos[0] + int(DIRS[h, 0]), p.pos[1] + int(DIRS[h, 1])), h
 
@@ -170,6 +182,8 @@ class SplixGame:
 
         Ignores what opponents might do this step.
         """
+        if action == PAUSE:
+            return True
         (r, c), _ = self.next_cell(pid, action)
         return self.in_bounds(r, c) and int(self.trail[r, c]) != pid
 
@@ -187,7 +201,13 @@ class SplixGame:
         new_pos: dict[int, tuple[int, int]] = {}
         new_head: dict[int, int] = {}
         for p in alive:
-            new_pos[p.pid], new_head[p.pid] = self.next_cell(p.pid, int(actions[p.pid]))
+            a = int(actions[p.pid])
+            if a == PAUSE:
+                p.paused = True
+                continue
+            p.paused = False
+            new_pos[p.pid], new_head[p.pid] = self.next_cell(p.pid, a)
+        movers = [p for p in alive if p.pid in new_pos]
 
         deaths: dict[int, tuple[str, int | None]] = {}
 
@@ -213,8 +233,8 @@ class SplixGame:
                         kill(q, "head_on", safe[0] if safe else None)
 
         # head-on: two players swapping cells
-        for i, p in enumerate(alive):
-            for q in alive[i + 1 :]:
+        for i, p in enumerate(movers):
+            for q in movers[i + 1 :]:
                 if new_pos[p.pid] == q.pos and new_pos[q.pid] == p.pos:
                     p_safe = int(self.owner[q.pos]) == p.pid
                     q_safe = int(self.owner[p.pos]) == q.pid
@@ -239,7 +259,10 @@ class SplixGame:
             self._eliminate(victim, cause, killer, ev)
 
         # survivors move, extend trails, capture
-        survivors = [p for p in alive if p.alive]
+        survivors = [p for p in movers if p.alive]
+        for p in alive:
+            if p.alive and p.paused:
+                p.steps_alive += 1
         if rng is not None and len(survivors) > 1:
             survivors = [survivors[i] for i in rng.permutation(len(survivors))]
         last_taker: dict[int, int] = {}

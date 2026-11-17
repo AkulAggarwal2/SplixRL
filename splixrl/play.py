@@ -6,7 +6,8 @@
     python -m splixrl.play --turn-based            # the game waits for your key
 
 Arrow keys or WASD steer (reversing is ignored, like the real game).
-Space pauses, R restarts, Esc quits. By default the game moves 6 cells a
+With --allow-pause, P stops your player (an arrow key starts it again).
+Space pauses the whole game, R restarts, Esc quits. By default the game moves 6 cells a
 second, the speed of the real game.
 """
 
@@ -15,7 +16,7 @@ from __future__ import annotations
 import argparse
 
 from .env import SplixEnv
-from .game import STRAIGHT, TURN_LEFT, TURN_RIGHT
+from .game import PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT
 from .opponents import DEFAULT_POOL
 from .viewer import Viewer
 
@@ -39,10 +40,13 @@ def main(argv=None) -> None:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--respawn", action="store_true", help="opponents come back after dying")
     ap.add_argument("--target-frac", type=float, default=None, help="win when you own this share of the map")
+    ap.add_argument("--allow-pause", action="store_true", help="P stops your player, as on the real server")
+    ap.add_argument("--max-pause", type=int, default=1000)
     args = ap.parse_args(argv)
 
     env = SplixEnv(size=args.size, opponents=args.opponents, n_opponents=args.n_opponents, max_steps=args.max_steps,
-                   respawn=args.respawn, target_frac=args.target_frac)
+                   respawn=args.respawn, target_frac=args.target_frac,
+                   allow_pause=args.allow_pause, max_pause=args.max_pause)
     viewer = Viewer(env, "SplixRL - you are purple")
     pg = viewer.pg
     keymap = {pg.K_UP: 0, pg.K_w: 0, pg.K_RIGHT: 1, pg.K_d: 1, pg.K_DOWN: 2, pg.K_s: 2, pg.K_LEFT: 3, pg.K_a: 3}
@@ -51,7 +55,10 @@ def main(argv=None) -> None:
     obs, info = env.reset(seed=seed)
     queue: list[int] = []  # buffered direction presses, so quick double turns work
     paused, over, total = False, False, 0.0
+    stop_me = False  # P pressed: player stopped until an arrow key
     help_lines = ["arrows / WASD: steer", "space: pause   R: restart", "esc: quit"]
+    if args.allow_pause:
+        help_lines.insert(1, "P: stop your player")
     running = True
     while running:
         step_now = False
@@ -65,7 +72,11 @@ def main(argv=None) -> None:
                     queue, over, paused, total = [], False, False, 0.0
                 elif e.key == pg.K_SPACE:
                     paused = not paused
+                elif e.key == pg.K_p and args.allow_pause and not over:
+                    stop_me = True
+                    step_now = args.turn_based
                 elif e.key in keymap and not over:
+                    stop_me = False
                     if len(queue) < 2:
                         queue.append(keymap[e.key])
                     step_now = args.turn_based
@@ -80,7 +91,8 @@ def main(argv=None) -> None:
                 if relative_action(heading, d) != STRAIGHT:
                     desired = d
                     break
-            obs, r, term, trunc, info = env.step(relative_action(heading, desired))
+            action = PAUSE if stop_me and not queue else relative_action(heading, desired)
+            obs, r, term, trunc, info = env.step(action)
             total += r
             over = term or trunc
 

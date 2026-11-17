@@ -28,7 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..game import N_ACTIONS, STRAIGHT, TURN_LEFT, TURN_RIGHT
+from ..game import N_ACTIONS, PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT
 from ..obs import ObsConfig
 from .base import Agent, obs_to_torch
 
@@ -64,6 +64,7 @@ class DynaConfig:
     dueling: bool = False  # separate state value and action advantage (Wang et al. 2016)
     tau: float = 0.0  # > 0: soft target update every step (Polyak); 0: hard copy every target_update
     model_gate: float = 1.0  # plan only while the model's error on changed cells is below this
+    n_actions: int = N_ACTIONS  # 4 when the env allows pausing
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -71,7 +72,8 @@ class DynaConfig:
 
 # ---------------------------------------------------------------- networks
 class QNetwork(nn.Module):
-    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int, dueling: bool = False):
+    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int, dueling: bool = False,
+                 n_actions: int = N_ACTIONS):
         super().__init__()
         self.dueling = dueling
         c, h, w = grid_shape
@@ -89,10 +91,10 @@ class QNetwork(nn.Module):
         if dueling:
             self.body = nn.Sequential(nn.Linear(n + n_vec, hidden), nn.ReLU())
             self.value = nn.Linear(hidden, 1)
-            self.advantage = nn.Linear(hidden, N_ACTIONS)
+            self.advantage = nn.Linear(hidden, n_actions)
         else:
             self.head = nn.Sequential(
-                nn.Linear(n + n_vec, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS)
+                nn.Linear(n + n_vec, hidden), nn.ReLU(), nn.Linear(hidden, n_actions)
             )
 
     def forward(self, grid: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
@@ -107,10 +109,11 @@ class QNetwork(nn.Module):
 class WorldModel(nn.Module):
     """(aligned grid, vec, action) -> next-grid logits, next vec, reward, terminal logit."""
 
-    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int):
+    def __init__(self, grid_shape: tuple[int, int, int], n_vec: int, hidden: int, n_actions: int = N_ACTIONS):
         super().__init__()
+        self.n_actions = n_actions
         c = grid_shape[0]
-        in_c = c + N_ACTIONS
+        in_c = c + n_actions
         self.body = nn.Sequential(
             nn.Conv2d(in_c, hidden, 3, padding=1),
             nn.ReLU(),
@@ -124,14 +127,14 @@ class WorldModel(nn.Module):
         # 1x1 head also sees the input, so "nothing changes" is easy to learn
         self.grid_head = nn.Conv2d(hidden + in_c, c, 1)
         self.mlp = nn.Sequential(
-            nn.Linear(2 * hidden + n_vec + N_ACTIONS, 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU()
+            nn.Linear(2 * hidden + n_vec + n_actions, 256), nn.ReLU(), nn.Linear(256, 256), nn.ReLU()
         )
         self.vec_head = nn.Linear(256, n_vec)
         self.reward_head = nn.Linear(256, 1)
         self.done_head = nn.Linear(256, 1)
 
     def forward(self, aligned: torch.Tensor, vec: torch.Tensor, action: torch.Tensor):
-        a1h = F.one_hot(action, N_ACTIONS).float()
+        a1h = F.one_hot(action, self.n_actions).float()
         planes = a1h[:, :, None, None].expand(-1, -1, aligned.shape[2], aligned.shape[3])
         x = torch.cat([aligned, planes], 1)
         h = self.body(x)
@@ -158,6 +161,9 @@ def pick_device(name: str = "auto") -> str:
 
 def _shift_rotate(grid: torch.Tensor, action: torch.Tensor, shift: bool) -> torch.Tensor:
     out = torch.zeros_like(grid)
+    hold = action == PAUSE
+    if hold.any():  # paused: the view stays where it is
+        out[hold] = grid[hold]
     s = action == STRAIGHT
     if s.any():  # new[i, j] = old[i - 1, j]
         if shift:
@@ -316,11 +322,11 @@ class DynaAgent(Agent):
         torch.manual_seed(seed)
 
         c = self.cfg
-        self.q = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling).to(self.device)
-        self.q_target = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling).to(self.device)
+        self.q = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling, c.n_actions).to(self.device)
+        self.q_target = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling, c.n_actions).to(self.device)
         self.q_target.load_state_dict(self.q.state_dict())
         self.q_opt = torch.optim.Adam(self.q.parameters(), lr=c.lr)
-        self.model = WorldModel(self.grid_shape, n_vec, c.model_hidden).to(self.device)
+        self.model = WorldModel(self.grid_shape, n_vec, c.model_hidden, c.n_actions).to(self.device)
         self.model_opt = torch.optim.Adam(self.model.parameters(), lr=c.model_lr)
         self.q_updates = 0
         # Acting is one observation at a time, which is slow on a GPU (each call
@@ -328,7 +334,7 @@ class DynaAgent(Agent):
         if self.device.type == "cpu":
             self.q_actor = self.q
         else:
-            self.q_actor = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling)
+            self.q_actor = QNetwork(self.grid_shape, n_vec, c.hidden, c.dueling, c.n_actions)
             self.sync_actor()
 
     @property
@@ -343,7 +349,7 @@ class DynaAgent(Agent):
     @torch.no_grad()
     def act(self, obs, deterministic: bool = True, epsilon: float = 0.0) -> int:
         if not deterministic and self.rng.random() < epsilon:
-            return int(self.rng.integers(N_ACTIONS))
+            return int(self.rng.integers(self.cfg.n_actions))
         grid, vec = obs_to_torch(obs, "cpu")
         return int(self.q_actor(grid, vec).argmax(1).item())
 
@@ -415,7 +421,7 @@ class DynaAgent(Agent):
                 break
             action = self.q(grid, vec).argmax(1)
             explore = torch.as_tensor(self.rng.random(len(grid)) < epsilon, device=self.device)
-            action = torch.where(explore, torch.randint(0, N_ACTIONS, action.shape, device=self.device), action)
+            action = torch.where(explore, torch.randint(0, self.cfg.n_actions, action.shape, device=self.device), action)
             logits, nvec, rew, done_logit = self.model(align(grid, action, self.obs_config), vec, action)
             probs = torch.sigmoid(logits)
             ngrid = torch.bernoulli(probs) if c.model_sample == "bernoulli" else (probs > 0.5).float()
