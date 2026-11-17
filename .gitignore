@@ -7,3 +7,4 @@ runs/
 plots/
 *.gif
 .DS_Store
+.splix-server/

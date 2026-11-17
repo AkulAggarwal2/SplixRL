@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--opponents", nargs="+", default=list(DEFAULT_POOL), help="training pool (bots or frozen:<path>)")
     p.add_argument("--obs-mode", default="local", choices=["local", "global"])
     p.add_argument("--view-radius", type=int, default=7)
+    p.add_argument("--lag-prob", type=float, default=0.0, help="chance a turn lands one tile late (live-server lag)")
     # eval
     p.add_argument("--eval-opponents", nargs="+", default=list(DEFAULT_POOL))
     p.add_argument("--eval-every", type=int, default=10_000)
@@ -93,6 +94,7 @@ def train(args: argparse.Namespace) -> Path:
         obs_mode=args.obs_mode,
         view_radius=args.view_radius,
         reward=reward.to_dict(),
+        lag_prob=args.lag_prob,
     )
     (run / "config.json").write_text(
         json.dumps(
@@ -116,9 +118,15 @@ def train(args: argparse.Namespace) -> Path:
     metric_log = CsvLogger(run / "metrics.csv", METRIC_FIELDS)
     evaluator = TrainingEvaluator(run, env_kwargs, args.eval_opponents, args.eval_episodes)
 
+    best = {"score": -1.0}
+
     def run_eval(step: int) -> None:
         agent.sync_actor()
-        evaluator(agent, step)
+        summary = evaluator(agent, step)
+        score = float(np.mean([r["win_rate"] for r in summary]))
+        if score > best["score"]:  # keep the checkpoint with the best mean win rate
+            best["score"] = score
+            agent.save(str(run / "best.pt"), extra={"env": env_kwargs, "step": step, "mean_win_rate": score})
         agent.save(str(run / "checkpoints" / f"agent_{step}.pt"), extra={"env": env_kwargs, "step": step})
 
     obs, info = env.reset(seed=args.seed)

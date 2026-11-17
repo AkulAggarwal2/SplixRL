@@ -173,3 +173,59 @@ def test_agent_with_other_view_settings_still_plays():
     agent = DynaAgent(ObsConfig(view_radius=6), (6, 13, 13), 11)
     rows = evaluate(AgentActor(agent), dict(size=16, max_steps=30, view_radius=4), ["loop"], 1)
     assert rows[0]["length"] > 0
+
+
+def test_live_trail_corners_and_snapshot():
+    """Live client: trail corners come from state updates; snapshot matches the server layout."""
+    import struct
+
+    from splixrl.live import LiveState, raster
+
+    assert raster([(2, 2), (2, 5), (4, 5)]) == [(2, 2), (2, 3), (2, 4), (2, 5), (3, 5), (4, 5)]
+    st = LiveState()
+    st.handle(bytes([12]) + struct.pack(">H", 12), 0.0)  # map size 12 (playable 1..10)
+    st.handle(bytes([3]) + struct.pack(">HHHHBBB", 0, 0, 12, 12, 0, 0, 1), 0.0)  # all wall
+    st.handle(bytes([3]) + struct.pack(">HHHHBBB", 1, 1, 10, 10, 1, 0, 1), 0.0)  # inner empty
+    st.handle(bytes([15]) + struct.pack(">HB", 0, 4), 0.0)  # my skin 4 -> tiles 6
+    st.handle(bytes([3]) + struct.pack(">HHHHBBB", 2, 2, 3, 3, 6, 0, 0), 0.0)  # my 3x3 land
+    st.handle(bytes([2]) + struct.pack(">HHHBB", 5, 3, 0, 0, 1), 0.0)  # me at (5,3) moving right
+    st.handle(bytes([4]) + struct.pack(">HHH", 0, 5, 3), 0.0)  # trail starts at (5,3)
+    st.handle(bytes([2]) + struct.pack(">HHHBB", 7, 3, 0, 1, 1), 0.0)  # turned down at (7,3)
+    assert st.players[0].trail == [(5, 3), (7, 3)]
+    g = st.snapshot((7, 4), 2, 0.0, 10, 500)  # head at (7,4) heading down
+    assert g.size == 10
+    assert g.owner[1:4, 1:4].tolist() == [[0] * 3] * 3  # server (2..4, 2..4) -> rows/cols 1..3
+    for x, y in [(5, 3), (6, 3), (7, 3), (7, 4)]:
+        assert g.trail[y - 1, x - 1] == 0
+    assert g.players[0].pos == (3, 6)
+
+
+def test_lag_delays_turns_by_one_tile():
+    env = SplixEnv(size=16, opponents=["random_safe"], lag_prob=1.0)
+    env.reset(seed=0)
+    p = env.game.players[0]
+    h0 = p.heading
+    _, _, _, _, info = env.step(TURN_LEFT)  # lagged: goes straight
+    assert p.heading == h0 and info["lagged"]
+    _, _, _, _, info = env.step(STRAIGHT)  # the delayed left turn lands now
+    assert p.heading == (h0 + 3) % 4 and info["lagged"]
+    no_lag = SplixEnv(size=16, opponents=["random_safe"])
+    no_lag.reset(seed=0)
+    no_lag.step(TURN_LEFT)
+    assert no_lag.game.players[0].heading == (h0 + 3) % 4
+
+
+def test_death_per_cell_makes_return_track_final_territory():
+    """With death_per_cell = capture_per_cell, dying gives back everything captured."""
+    env = SplixEnv(size=16, opponents=["random_safe"], reward={"death": 0.0, "kill": 0.0, "death_per_cell": 0.1})
+    for seed in range(10):
+        env.reset(seed=seed)
+        bot = make_opponent("loop")
+        bot.reset(env.game, 0, np.random.default_rng(seed))
+        start, ret, done = env.game.territory(0), 0.0, False
+        while not done:
+            _, r, term, trunc, info = env.step(bot.act(env.game, 0))
+            ret += r
+            done = term or trunc
+        if not info["alive"]:
+            assert ret == pytest.approx(-0.1 * start, abs=1e-6)  # only the starting square is "lost"

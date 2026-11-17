@@ -9,6 +9,7 @@ Akul Aggarwal, Sai Dhanasiri, Ahaan Kallat).
 * **Dyna** (Ahaan, `splixrl/agents/dyna.py`): Double-DQN learner plus a learned world model that generates imagined transitions.
 * **Double DQN** (Akul, `splixrl/agents/ddqn.py`) and **PPO** (Sai, `splixrl/agents/ppo.py`): interface stubs to fill in.
 * Manual play, live/GIF viewer, learning-curve plots.
+* **Real game** (`splixrl/live.py`): agents and bots play on the official Splix server, run locally.
 
 ## Setup
 
@@ -53,7 +54,12 @@ Everything happens on a square grid, and all players move at once each step.
 * +3 per kill
 * −3 on death
 
-Optional extras: potential-based shaping on trail length (Ng et al. 1999), a per-step cost, a win bonus, and a penalty for cells lost.
+Optional extras:
+* `death_per_cell`: a death penalty per cell owned, i.e. dying costs everything you hold (see problem 2 below);
+* potential-based shaping on trail length (Ng et al. 1999);
+* a per-step cost, a win bonus, and a penalty for cells lost.
+
+`lag_prob` makes a requested turn land one tile late with that probability, imitating the real server's lag (see "Real game").
 
 ## Opponents
 
@@ -106,6 +112,35 @@ python -m splixrl.evaluate --actors runs/round1/*/seed0/agent.pt --opponents $PO
 ### Problems found so far
 
 1. **Turtling beat the bots.** An agent that just circles inside its start square beat LoopBot 48/50 and ChaserBot 44/50: the bots drew loops right past it and got cut. Fix: bots leave home on the side away from enemy heads and keep 2 cells from them. After the fix the turtler loses 48/50 and 47/50. `test_bots_beat_turtling` guards this.
+2. **The reward paid for risk the game punishes.** With reward v1 (+0.1 per cell, flat −3 for dying), Dyna's training return kept rising after 50k steps (peak territory 52 → 103 cells), while its win rate against LoopBot fell from 0.85–1.0 to 0.15–0.2 and against ChaserBot from 0.35–0.65 to 0–0.05, in all 3 seeds. Big loops pay +6 and up, so getting cut sometimes is worth it under the reward, but losing everything on death loses the game. Fix (reward v2): `--reward-death-per-cell 0.1 --reward-lost-per-cell 0.1`. The return then adds up to final territory plus kills, like the real score. Runs: `runs/round0` (v1) vs `runs/round0_reward2` (v2). Training also keeps `best.pt`, the checkpoint with the best mean evaluation win rate.
+
+## Real game
+
+Trained agents (and our bots) can play on the official, open-source Splix server
+([jespertheend/splix](https://github.com/jespertheend/splix), MIT), running on your own machine, so no public servers or real players are involved.
+
+```bash
+# once: download the macOS server and web client into .splix-server/ (gitignored)
+mkdir -p .splix-server && cd .splix-server
+gh release download v0.19.0 -R jespertheend/splix -p splixGameServer_macos.tar -p client.tar
+mkdir -p server client && tar -xf splixGameServer_macos.tar -C server && tar -xf client.tar -C client && cd ..
+
+# terminal 1: the server (40x40 arena; default is 100x100)
+.splix-server/server/splixGameServer -s 40
+
+# terminal 2: an agent plays 10 lives against 4 bots, with a window showing what it sees
+python -m splixrl.live --actor runs/round0/dyna/seed1/best.pt --lives 10 \
+    --bots loop chaser loop random_safe --show --out runs/live/dyna.csv
+```
+
+`--bots` alone (no `--actor`) keeps bots playing until Ctrl-C. Then join yourself from a browser at
+`https://splix.io/#ip=ws://localhost:8080` (the server's own instructions) and play against them.
+
+How it works. Once per tile, `live.py` rebuilds a `SplixGame` snapshot from what the server sent and asks the actor for a move. The snapshot holds tiles, trails, and player positions dead-reckoned at 6 tiles/s. The actor sees it through the same observation code as in training.
+
+**Lag.** The server drops turn messages while a tick runs slow, and it can apply a turn late or rewind a player. The client therefore checks that every turn comes back from the server, re-sends turns that don't (the server then rewinds to that tile), and logs turns, confirmations, re-sends and lost turns per life.
+
+That cut Dyna's wall deaths on the server from 4/10 lives to 1/10: mean tiles went from 83 to 101 and mean time alive from 30 s to 36.5 s, at 50–60k training steps against 4 bots. To make agents robust to the rest, train with `--lag-prob 0.05`, where turns sometimes land a tile late. The world model then has to learn that moves are uncertain too.
 
 ## Adding Double DQN / PPO
 
@@ -140,6 +175,7 @@ splixrl/evaluation.py    evaluate, summarize, TrainingEvaluator
 splixrl/train_dyna.py    Dyna training CLI
 splixrl/evaluate.py      results table / cross-play CLI
 splixrl/plot.py          learning curves
+splixrl/live.py          client for the real Splix server
 splixrl/watch.py, play.py, viewer.py, render.py
 tests/
 ```

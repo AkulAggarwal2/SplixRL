@@ -11,6 +11,11 @@ class RewardConfig:
     lost_per_cell: float = 0.0  # per own cell taken by an opponent's capture
     kill: float = 3.0  # per opponent eliminated by this agent
     death: float = -3.0  # once, when the agent dies
+    # per cell the agent owned when it died (all of it is lost). With this equal
+    # to capture_per_cell (and lost_per_cell), the return adds up to the
+    # territory held at the end, like the real game's score, so big risky
+    # loops are no longer free. 0 = flat death penalty only (reward v1).
+    death_per_cell: float = 0.0
     win: float = 0.0  # once, if the episode ends in a win
     step: float = 0.0  # every step (negative = time pressure)
     # Potential-based shaping (Ng, Harada & Russell 1999). The potential is
