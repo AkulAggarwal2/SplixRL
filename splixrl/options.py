@@ -349,6 +349,7 @@ class OptionsEnv(gym.Wrapper):
                            can_pause=getattr(base, "allow_pause", False), safety=self.safety, lag_slack=self.lag_slack)
         total, disc, k = 0.0, 1.0, 0
         obs, term, trunc, info = None, False, False, {}
+        base.lazy_obs = True  # full observation only once, when the plan ends
         while True:
             a = run.act(base.game, 0)
             if a is None:
@@ -361,6 +362,8 @@ class OptionsEnv(gym.Wrapper):
             k += 1
             if term or trunc:
                 break
+        base.lazy_obs = False
+        obs = base._obs()
         info = dict(info)
         info.update(option_disc=disc, option_steps=k, option_aborted=run.aborted)
         return obs, total, term, trunc, info
@@ -392,6 +395,9 @@ class OptionsActor:
         if self.run is not None:
             a = self.run.act(game, pid)
             if a is not None:
+                from .obs import update_memory
+
+                update_memory(game, pid, self.agent.obs_config)
                 return a
         o = build_obs(game, pid, self.agent.obs_config)
         option = int(self.agent.act(o, deterministic=self.deterministic))

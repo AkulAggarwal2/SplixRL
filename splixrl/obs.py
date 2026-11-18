@@ -395,6 +395,13 @@ def minimap_planes(game: SplixGame, pid: int, w: int) -> np.ndarray:
     return out
 
 
+def update_memory(game: SplixGame, pid: int, cfg: ObsConfig) -> None:
+    """Record this step in the memory channels without building an observation."""
+    if cfg.memory:
+        visible = _visible_mask(game, game.players[pid].pos, cfg.visible_radius)
+        memory_planes(game, pid, cfg.width, cfg.memory, visible)
+
+
 def memory_planes(game: SplixGame, pid: int, w: int, horizon: int,
                   visible: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     """(3, w, w) minimap-frame memory (fading last-seen enemy heads, land growth,

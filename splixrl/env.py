@@ -33,7 +33,7 @@ import gymnasium as gym
 import numpy as np
 
 from .game import N_ACTIONS, N_ACTIONS_WITH_PAUSE, PAUSE, STRAIGHT, SplixGame
-from .obs import ObsConfig, build_obs
+from .obs import ObsConfig, build_obs, update_memory
 from .opponents import Opponent, make_opponent, opponent_label
 from .render import render_rgb
 from .rewards import RewardConfig
@@ -159,8 +159,19 @@ class SplixEnv(gym.Env):
             lag_range=self.lag_range,
         )
 
+    # Set by wrappers that only look at some steps' observations (OptionsEnv:
+    # once per plan). step() then returns None for the observation and only
+    # keeps the memory channels up to date, which must see every step.
+    lazy_obs = False
+
     def _obs(self) -> dict[str, np.ndarray]:
         return build_obs(self.game, 0, self.obs_config)
+
+    def _step_obs(self):
+        if not self.lazy_obs:
+            return self._obs()
+        update_memory(self.game, 0, self.obs_config)
+        return None
 
     def _potential(self) -> float:
         rc = self.reward_config
@@ -290,7 +301,7 @@ class SplixEnv(gym.Env):
                 share = sum(o < mine for o in others) / max(1, len(others))
                 info["rank_share"] = share
                 r += rc.rank_bonus * share
-        return self._obs(), float(r), terminated, truncated, info
+        return self._step_obs(), float(r), terminated, truncated, info
 
     def _respawn_opponents(self) -> None:
         g = self.game
