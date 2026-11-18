@@ -107,3 +107,5 @@ Even random option choices reached a mean peak of 317 cells on 40×40 with 3 bot
 | loop | return 85.4, 2.0 kills, peak 384 | return 103.1, 7.3 kills, peak 449 |
 
 With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunters and stalkers, 5% lag): the options agent at 15k decisions scores return 83.9, peak 306, 637 steps, 8.1 kills, 13% survival. That's 3.4× the per-tile agent's 25.0. Later checkpoints of the same run (135k, 150k) were within noise of it (76–79), with longer games and more kills.
+
+**Options run B** (defend reflex built in during training, learning rate 5e-5) beat the earlier best on the same 60 hard games: return 89.1 vs 74.4, game length 733 vs 575, kills 11.5 vs 7.4, survival 23% vs 15%, peak land 262 vs 286. Note the earlier best scored 83.9 on its first run of these 60 games, which shows how noisy a 60-game evaluation still is. B is now `runs/options/BEST_OPTIONS_AGENT.pt`, and run C adds the 2 adaptive options on top of it.
