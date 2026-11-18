@@ -16,6 +16,11 @@ margin (nearest visible enemy's distance to my trail minus my distance home)
 falls to ``safety + lag_slack * lag``, abort and take the shortest safe way
 home. More lag means acting earlier, because a turn can land a tile late.
 No option runs longer than MAX_OPTION_STEPS, and a loop always ends at home.
+
+Every option also shares a defend reflex: when an enemy trail lies on my own
+land within DEFEND_RADIUS, go cut it, moving only over my own land (where I
+can't be killed). An enemy eating into my territory is the easiest kill in
+the game, so it is not left to the learner to notice.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ OPTION_NAMES = tuple(
 )
 
 MAX_OPTION_STEPS = 90
+DEFEND_RADIUS = 15  # cut an enemy trail lying on my land when it is this close
 VIEW = 25  # options only look this far (the server's range)
 ORDER = [STRAIGHT, TURN_LEFT, TURN_RIGHT]
 
@@ -74,7 +80,7 @@ class OptionRunner:
     action each step, or None once the option is over."""
 
     def __init__(self, option: int, rng: np.random.Generator, lag: float = 0.0, can_pause: bool = True,
-                 safety: float = 2.0, lag_slack: float = 30.0):
+                 safety: float = 2.0, lag_slack: float = 30.0, defend: bool = True):
         self.kind, *self.params = OPTIONS[option]
         self.option = option
         self.rng = rng
@@ -85,6 +91,8 @@ class OptionRunner:
         self.left_home = False
         self.done = False
         self.aborted = False  # the safety rule fired
+        self.defend = defend
+        self.defended = 0  # steps spent on the defend reflex
 
     # -- helpers ----------------------------------------------------------------
     def _near(self, game, pid, radius=2):
@@ -150,7 +158,25 @@ class OptionRunner:
             return self._go_home(game, pid)
         if self.phase == "home":
             return self._go_home(game, pid)
+        if self.defend and at_home:
+            a = self._defend(game, pid)
+            if a is not None:
+                self.defended += 1
+                return a
         return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
+
+    def _defend(self, game, pid):
+        own = game.owner == pid
+        invader = (game.trail != EMPTY) & (game.trail != pid) & own
+        if not invader.any():
+            return None
+        p = game.players[pid]
+        cells = np.argwhere(invader)
+        if int(np.abs(cells - np.array(p.pos)).sum(1).min()) > DEFEND_RADIUS:
+            return None
+        # stay on my land all the way (enemy trail cells on my land are the goal)
+        a = bfs_first_action(game, pid, invader, ~own | (game.trail == pid), ORDER)
+        return a if a is not None and game.is_safe(pid, a) else None
 
     # -- the options -----------------------------------------------------------
     def _opt_loop(self, game, pid, at_home):

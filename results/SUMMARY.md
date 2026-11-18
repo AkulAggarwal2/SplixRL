@@ -97,3 +97,11 @@ Same 60 games (48×48, 6 opponents including hunters and stalkers, 5% lag):
 | **options agent (15k decisions)** | **68.6** | **239** | **594** | **12%** | 2.6 |
 
 Even random option choices reached a mean peak of 317 cells on 40×40 with 3 bots. Most of the gain comes from the plans, and learning chooses between them. Training-time evaluations peaked at 15k decisions and then drifted, as the per-tile runs did.
+
+**Defend reflex.** Every option now cuts an enemy trail lying on the agent's own land within 15 tiles, moving only over its own land. Same 36 games each, 40×40, 4 opponents:
+
+| vs | without | with |
+|---|---|---|
+| invader | return 63.6, 2.8 kills, peak 225 | return 103.3, 9.3 kills, peak 308 |
+| greedy | return 76.9, 5.9 kills, peak 325 | return 111.9, 16.0 kills, peak 403 |
+| loop | return 85.4, 2.0 kills, peak 384 | return 103.1, 7.3 kills, peak 449 |
