@@ -51,6 +51,13 @@ S_PLAYER_STATE, S_FILL_RECT, S_SET_PLAYER_TRAIL, S_PLAYER_DIE = 2, 3, 4, 5
 S_REMOVE_PLAYER, S_MY_SCORE, S_MY_RANK, S_LEADERBOARD = 7, 9, 10, 11
 S_MAP_SIZE, S_GAME_OVER, S_PLAYER_SKIN = 12, 13, 15
 S_EMPTY_TRAIL, S_READY, S_UNDO_PLAYER_DIE = 16, 17, 22
+S_PONG = 21
+# Not a real server message. The local copy of the splix.io client treats it as a keypress.
+SPLIX_TURN_HOOK = 255
+_TURN_NEEDLE = b"f=new Uint8Array(e.data);f[0]==ki"
+_TURN_PATCH = (
+    f"f=new Uint8Array(e.data);if(f[0]=={SPLIX_TURN_HOOK})return void Bn(f[1]);f[0]==ki"
+).encode()
 S_MINIMAP = 14
 MINIMAP_SIZE, MINIMAP_PART_W = 80, 20  # 80x80 bitmap of "anyone's land", sent as 4 strips of 20 columns
 MINIMAP_SCALE = 3
@@ -402,11 +409,40 @@ class WebLink:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.closed = asyncio.Event()
         self._send_lock = asyncio.Lock()
+        self._browser_lock = asyncio.Lock()
         self._done = False
+        self.rtt = 0.08  # seconds, smoothed from the page's own pings
+        self._ping_at: float | None = None
+        self._previews: set[asyncio.Task] = set()
 
     async def send(self, data) -> None:
         async with self._send_lock:
             await self.upstream.send(data)
+
+    def request_turn(self, when: float, direction: int) -> None:
+        """Ask the page to take this turn the way a keypress would.
+
+        A position update from the server snaps the head and drops the corner,
+        so the trail is drawn as a diagonal. The page's own turn routine records
+        the corner and keeps moving on the grid. Its packet is still dropped;
+        the actor's turn is the one the server applies.
+        """
+
+        async def send() -> None:
+            try:
+                delay = when - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                if self._done:
+                    return
+                async with self._browser_lock:
+                    await self.browser.send(bytes([SPLIX_TURN_HOOK, direction & 0xFF]))
+            except (asyncio.CancelledError, Exception):
+                return
+
+        task = asyncio.create_task(send())
+        self._previews.add(task)
+        task.add_done_callback(self._previews.discard)
 
     def __aiter__(self):
         return self._messages()
@@ -425,8 +461,14 @@ class WebLink:
             try:
                 async for message in self.upstream:
                     if isinstance(message, bytes):
+                        if message[:1] == bytes([S_PONG]) and self._ping_at is not None:
+                            sample = time.monotonic() - self._ping_at
+                            self._ping_at = None
+                            if 0 < sample < 2:
+                                self.rtt = 0.7 * self.rtt + 0.3 * sample
                         self.queue.put_nowait(message)
-                    await self.browser.send(message)
+                    async with self._browser_lock:
+                        await self.browser.send(message)
             except websockets.ConnectionClosed:
                 pass
 
@@ -436,6 +478,8 @@ class WebLink:
                     # Arrow keys belong to the page. The actor sends the turns.
                     if isinstance(message, bytes) and message[:1] == bytes([C_UPDATE_MY_POS]):
                         continue
+                    if isinstance(message, bytes) and message[:1] == bytes([C_PING]):
+                        self._ping_at = time.monotonic()
                     async with self._send_lock:
                         await self.upstream.send(message)
             except websockets.ConnectionClosed:
@@ -448,6 +492,8 @@ class WebLink:
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
         finally:
+            for task in list(self._previews):
+                task.cancel()
             for sock in (self.upstream, self.browser):
                 try:
                     await sock.close()
@@ -466,18 +512,71 @@ class WebRelay:
         self.upstream = upstream
         self._links: asyncio.Queue = asyncio.Queue()
         self._server = None
+        self._httpd = None
         self.port: int | None = None
+        self.http_port: int | None = None
 
-    async def start(self) -> None:
+    async def start(self, viewer: bool = False) -> None:
         import websockets
 
         self._server = await websockets.serve(self._handler, "127.0.0.1", 0, max_size=None)
         self.port = self._server.sockets[0].getsockname()[1]
+        if viewer:
+            await asyncio.to_thread(self._start_viewer)
+
+    def _start_viewer(self) -> None:
+        """Serve splix.io with one extra line: a turn hook the relay can call."""
+        import http.server
+        import urllib.request
+
+        files = fetch_splix_page()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                path = self.path.split("?", 1)[0]
+                body = files.get(path if path != "/index.html" else "/")
+                if body is None and path == "/":
+                    body = files.get("/")
+                if body is not None:
+                    kind = "text/html" if path in ("/", "/index.html") else "text/javascript"
+                    self.send_response(200)
+                    self.send_header("Content-Type", kind)
+                    self.send_header("Content-Length", str(len(body)))
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if ".." in path or not path.startswith("/"):
+                    self.send_error(404)
+                    return
+                try:
+                    req = urllib.request.Request(
+                        "https://splix.io" + self.path, headers={"User-Agent": "SplixRL"}
+                    )
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        payload = resp.read()
+                        ctype = resp.headers.get("Content-Type", "application/octet-stream")
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                except Exception:
+                    self.send_error(502)
+
+            def log_message(self, fmt: str, *args) -> None:
+                return
+
+        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.http_port = self._httpd.server_address[1]
+        threading.Thread(target=self._httpd.serve_forever, daemon=True).start()
 
     async def close(self) -> None:
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
+        if self._httpd is not None:
+            self._httpd.shutdown()
 
     async def next_link(self) -> WebLink:
         return await self._links.get()
@@ -494,7 +593,41 @@ class WebRelay:
 
     @property
     def page(self) -> str:
-        return f"https://splix.io/#ip=ws://localhost:{self.port}"
+        ip = f"ws://localhost:{self.port}"
+        if self.http_port:
+            return f"http://127.0.0.1:{self.http_port}/#ip={ip}"
+        return f"https://splix.io/#ip={ip}"
+
+
+def patch_splix_client(bundle: bytes) -> bytes:
+    """Make the official client take a turn when it sees SPLIX_TURN_HOOK."""
+    if bundle.count(_TURN_NEEDLE) != 1:
+        raise RuntimeError("this splix.io client does not have the expected turn handler")
+    return bundle.replace(_TURN_NEEDLE, _TURN_PATCH, 1)
+
+
+def fetch_splix_page() -> dict[str, bytes]:
+    """Download the current splix.io page and client, with the turn hook inserted."""
+    import re
+    import urllib.request
+
+    def get(url: str) -> bytes:
+        req = urllib.request.Request(url, headers={"User-Agent": "SplixRL"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return resp.read()
+
+    html = get("https://splix.io/")
+    match = re.search(rb'src="(\./bundle/[^"]+\.js)"', html)
+    if match is None:
+        raise RuntimeError("splix.io page has no client bundle")
+    rel = match.group(1).decode()[2:]
+    bundle = patch_splix_client(get("https://splix.io/" + rel))
+    files = {"/": html, "/" + rel: bundle}
+    imported = re.search(rb'import"(\./[^"]+)"', bundle)
+    if imported is not None:
+        name = imported.group(1).decode()[2:]
+        files["/bundle/" + name] = get("https://splix.io/bundle/" + name)
+    return files
 
 
 async def play_life(server: str, actor, name: str, color: int, max_steps: int, verbose: bool, seat: int = 0,
@@ -561,6 +694,17 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
             paused_for, last_pause_decision = 0, 0.0
             seen_states = len(state.my_states)
             lag = {"turns": 0, "confirmed": 0, "resent": 0, "lost": 0, "corrections": 0}
+
+            def show_turn(when: float, direction: int) -> None:
+                # Hand the turn to the page's own key handler so it keeps the corner.
+                # Fire when the page is about 60% across the tile it is leaving.
+                request = getattr(ws, "request_turn", None)
+                if request is not None:
+                    request(when, direction)
+
+            def page_turn_at(t_arrive: float) -> float:
+                lead = min(getattr(ws, "rtt", 0.0) / 2, 0.45 * TILE_SEC)
+                return t_arrive - 0.4 * TILE_SEC - lead
             while state.game_over is None and not closed.is_set():
                 now = time.monotonic()
                 if now - last_ping > 20:
@@ -616,6 +760,7 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                             sd = HEADING_TO_SERVER[turn(last_heading, a)]
                             msg = struct.pack(">BbHH", C_UPDATE_MY_POS, sd, me.x, me.y)
                             await ws.send(msg)
+                            show_turn(now, sd)
                             lag["turns"] += 1
                             before = (me.x, me.y, me.dir, me.t)
                             me.dir, me.t = sd, now
@@ -645,6 +790,7 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                     if action == PAUSE:  # stop on tile nxt
                         msg = struct.pack(">BbHH", C_UPDATE_MY_POS, 4, nxt[0], nxt[1])
                         await ws.send(msg)
+                        show_turn(page_turn_at(t_next), 4)
                         lag["turns"] += 1
                         before = (me.x, me.y, me.dir, me.t)
                         me.x, me.y, me.dir, me.t = nxt[0], nxt[1], 4, t_next
@@ -656,6 +802,7 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                         sd = HEADING_TO_SERVER[new_heading]
                         msg = struct.pack(">BbHH", C_UPDATE_MY_POS, sd, nxt[0], nxt[1])
                         await ws.send(msg)
+                        show_turn(page_turn_at(t_next), sd)
                         lag["turns"] += 1
                         before = (me.x, me.y, me.dir, me.t)
                         # predict: from tile nxt onward we move in the new direction,
@@ -716,7 +863,7 @@ async def amain(args) -> None:
     relay = None
     if args.web:
         relay = WebRelay(args.server)
-        await relay.start()
+        await relay.start(viewer=True)
         print(f"real client: {relay.page}", flush=True)
         print("The server list says \"From url\". Click Play. That page is the game; the agent steers it.", flush=True)
         webbrowser.open(relay.page)

@@ -385,6 +385,55 @@ def test_web_relay_forwards_the_server_and_drops_keyboard_turns():
     assert bytes([1, 3, 0, 5, 0, 6]) in got
 
 
+def test_web_turn_hook_reaches_the_page_and_not_the_server():
+    """The page is asked to turn; that request is not a second turn to the server."""
+    import asyncio
+    import time
+
+    import websockets
+
+    from splixrl.live import SPLIX_TURN_HOOK, WebRelay
+
+    got = []
+
+    async def upstream(ws):
+        async for message in ws:
+            got.append(message)
+            if message[:1] == bytes([7]):
+                await ws.send(bytes([21]))
+
+    async def run():
+        async with websockets.serve(upstream, "127.0.0.1", 0, max_size=None) as server:
+            port = server.sockets[0].getsockname()[1]
+            relay = WebRelay(f"ws://127.0.0.1:{port}")
+            await relay.start()
+            try:
+                async with websockets.connect(f"ws://127.0.0.1:{relay.port}", max_size=None) as browser:
+                    waiting = asyncio.create_task(relay.next_link())
+                    await browser.send(bytes([7]))
+                    assert await asyncio.wait_for(browser.recv(), 2) == bytes([21])
+                    link = await waiting
+                    await asyncio.sleep(0.02)
+                    assert link._ping_at is None
+                    assert 0 < link.rtt < 0.5
+                    link.request_turn(time.monotonic() + 0.05, 1)
+                    shown = await asyncio.wait_for(browser.recv(), 1)
+                    assert shown == bytes([SPLIX_TURN_HOOK, 1])
+            finally:
+                await relay.close()
+
+    asyncio.run(run())
+    assert bytes([SPLIX_TURN_HOOK, 1]) not in got
+
+
+def test_splix_client_hook_calls_the_page_turn_routine():
+    from splixrl.live import patch_splix_client
+
+    src = b"prefix f=new Uint8Array(e.data);f[0]==ki suffix"
+    out = patch_splix_client(src)
+    assert b"if(f[0]==255)return void Bn(f[1]);" in out
+
+
 def test_live_minimap_decode():
     import struct
 

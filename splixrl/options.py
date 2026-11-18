@@ -131,6 +131,11 @@ def _enemy_heads(game: SplixGame, pid: int) -> np.ndarray:
 
 
 MEMORY_TRUST = 30  # remembered enemies older than this many steps are ignored
+MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many tiles per step since seen
+# Loops are sized to fit the safety budget before they start (out + along <=
+# BUDGET_SHARE * (nearest enemy reach - cushion)), so they finish as rectangles
+# instead of being aborted halfway, which captured almost nothing.
+BUDGET_SHARE = 0.8
 
 
 def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
@@ -150,7 +155,7 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
         for pos, t in mem.get("seen", {}).values():
             age = clock - t
             if 0 < age <= MEMORY_TRUST:
-                d = int(np.abs(exposed - np.array(pos)).sum(1).min()) - age
+                d = int(np.abs(exposed - np.array(pos)).sum(1).min() - MEMORY_SPEED * age)
                 d = max(0, d)
                 best = d if best is None else min(best, d)
     return best
@@ -197,6 +202,8 @@ class OptionRunner:
         self.aborted = False  # the safety rule fired
         self.face: int | None = None  # world direction an adaptive loop heads out in
         self.defend = defend
+        self.idle_guard = False  # if on: never stand around on my land with nobody in view (hurt in simulation, see SUMMARY)
+        self.idled_off = False
         self.defended = 0  # steps spent on the defend reflex
 
     # -- helpers ----------------------------------------------------------------
@@ -272,7 +279,22 @@ class OptionRunner:
                     return a
         if self.phase == "home":
             return self._go_home(game, pid)
+        if at_home and self.idle_guard and self.kind in ("home", "ambush", "attack") and self.phase is None \
+                and not self._threat_near(game, pid):
+            # nothing to wait for or attack: expand instead of idling
+            self.kind = "open_loop"
+            self.idled_off = True
         return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
+
+    def _threat_near(self, game, pid, radius: int = VIEW) -> bool:
+        p = game.players[pid]
+        reach = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64))
+        enemy_trail = (game.trail != EMPTY) & (game.trail != pid)
+        if enemy_trail.any():
+            d = int(np.abs(np.argwhere(enemy_trail) - np.array(p.pos)).sum(1).min())
+            if d <= VIEW:
+                return True  # something to attack
+        return reach is not None and reach <= radius
 
     def _invasion(self, game, pid, at_home):
         """Enemy trail cells on my land worth going for, or None.
@@ -375,6 +397,8 @@ class OptionRunner:
             if not p.trail or len(p.trail) <= 2:
                 return self._checked(game, pid, TURN_RIGHT if diff in (1, 2) else TURN_LEFT)
         if self.phase is None:  # first tile outside: plan the rectangle from here
+            out, side = self._fit_budget(game, pid, out, side)
+            self.params = [out, side, turn]
             self.phase, self.left = "out", out - 1
         if self.phase == "out":
             if self.left > 0:
@@ -387,6 +411,18 @@ class OptionRunner:
                 self.left -= 1
                 return self._checked(game, pid, STRAIGHT)
         return self._go_home(game, pid)
+
+    def _fit_budget(self, game, pid, out, side):
+        """Shrink a loop (keeping its shape) so it fits the time before an enemy could arrive."""
+        p = game.players[pid]
+        reach = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64))
+        if reach is None:
+            return out, side
+        budget = BUDGET_SHARE * (reach - self.threshold)
+        if out + side <= budget:
+            return out, side
+        scale = max(0.0, budget) / (out + side)
+        return max(1, int(out * scale)), max(1, int(side * scale))
 
     def _opt_home(self, game, pid, at_home):
         return self._step_inside(game, pid) if at_home else self._go_home(game, pid)
