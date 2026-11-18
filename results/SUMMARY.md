@@ -84,3 +84,16 @@ Fine-tune B3 repeats B2 with learning rate 5e-5 and a 2.5× slower target networ
 | **B3 at 100k (lr 5e-5)** | **45.0** | **147** | **467** | **9.0** | **2%** | 38% |
 
 Every B3 checkpoint from 25k on beat the previous best. B3 at 100k is now `runs/curriculum/BEST_REALGAME_AGENT.pt` (the old one is `..._v1.pt`). Stage C is being redone with the same gentle settings (`runs/curriculum/C2`).
+
+## 7. Options agent: plans instead of tiles
+
+Per-tile agents made wiggly, staircase and runaway trails, because a clean loop needs 20–40 per-tile decisions that all agree. The options agent (`splixrl/options.py`) picks among 14 plans: 10 rectangular loops, home, reclaim, attack and ambush. Scripted controllers carry the plans out. One shared, lag-aware safety rule aborts a plan and goes home when an enemy could cut the trail first. Learning is over the semi-MDP (Sutton, Precup & Singh 1999), with the bootstrap discount γ^k per option. The agent warm-starts from the per-tile agent's learned vision.
+
+Same 60 games (48×48, 6 opponents including hunters and stalkers, 5% lag):
+
+| | return | peak land | game length | survived | kills |
+|---|---|---|---|---|---|
+| per-tile best | 25.0 | 147 | 291 | 0% | 3.9 |
+| **options agent (15k decisions)** | **68.6** | **239** | **594** | **12%** | 2.6 |
+
+Even random option choices reached a mean peak of 317 cells on 40×40 with 3 bots. Most of the gain comes from the plans, and learning chooses between them. Training-time evaluations peaked at 15k decisions and then drifted, as the per-tile runs did.
