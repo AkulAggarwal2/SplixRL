@@ -164,3 +164,13 @@ The guard is now on by default.
 | **both** | **133.1 / 305.7** | **56% / 67%** | **7** | **2252** | **15%** | **0.50** |
 
 The guard alone hurt: without hugging, the loops it does start jut out, so they take longer and get caught. Both are on. The territory still fills only half its bounding box; a plan that lays long strips along a whole side would be the next step, and needs training.
+
+**Run E vs run C** (current rules, bots incl. `human`; crowded = 60 games on 48×48 with 6 opponents, sparse = 30 games on 96×96 with 4 opponents). E's `best.pt` is its 60k checkpoint.
+
+| | return crowded / sparse | peak land crowded / sparse | survival crowded / sparse | trail-cut deaths |
+|---|---|---|---|---|
+| **run C** | 102.8 / **318.6** | 438 / **2337** | 45% / **87%** | 14 |
+| E at 60k | 111.9 / 288.8 | 481 / 2047 | 42% / 70% | 13 |
+| E at 100k | **124.5** / 298.1 | **530** / 2226 | 43% / 73% | 15 |
+
+E is better in crowded games and worse on the sparse map, and survives less overall (48 vs 53 of 90). That isn't clearly better, so C stays `BEST_OPTIONS_AGENT.pt`. With the current rules, C on the sparse map is now at 87% survival and 2337 peak land, vs 40% and 1281 before the idle-guard and shape fixes, so the rule changes did most of the work. The race features start at zero weight, and 100k decisions of gentle fine-tuning was apparently not enough for the agent to make use of them.
