@@ -1,0 +1,306 @@
+"""Options (temporally extended actions): an agent that picks plans, not tiles.
+
+A per-tile agent has to make 20-40 decisions that all agree to draw one clean
+loop; with limited training some of them don't, which shows up as wiggly,
+staircase or runaway trails. Here the agent picks an option ("draw a 7x5 loop
+turning left", "go home", "reclaim", "attack", "ambush") and a scripted
+controller carries it out tile by tile. The learner decides what matters:
+when to expand, how far, which way, when to attack, defend or go home.
+
+This is the options framework (Sutton, Precup & Singh 1999). Learning over
+options is a semi-MDP: each decision's reward is the discounted sum over the
+option's steps, and the bootstrap discount is gamma ** (option length).
+
+Every option shares one safety rule: while a trail is out, if the escape
+margin (nearest visible enemy's distance to my trail minus my distance home)
+falls to ``safety + lag_slack * lag``, abort and take the shortest safe way
+home. More lag means acting earlier, because a turn can land a tile late.
+No option runs longer than MAX_OPTION_STEPS, and a loop always ends at home.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from .game import EMPTY, PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
+from .opponents.base import bfs_first_action, safe_actions
+
+LOOP_SIZES = ((3, 3), (5, 4), (7, 5), (10, 6), (14, 8))  # (tiles out, tiles along)
+OPTIONS: tuple[tuple, ...] = tuple(
+    ("loop", out, side, turn) for out, side in LOOP_SIZES for turn in (TURN_LEFT, TURN_RIGHT)
+) + (("home",), ("reclaim",), ("attack",), ("ambush",))
+N_OPTIONS = len(OPTIONS)
+OPTION_NAMES = tuple(
+    f"loop {o[1]}x{o[2]} {'L' if o[3] == TURN_LEFT else 'R'}" if o[0] == "loop" else o[0] for o in OPTIONS
+)
+
+MAX_OPTION_STEPS = 90
+VIEW = 25  # options only look this far (the server's range)
+ORDER = [STRAIGHT, TURN_LEFT, TURN_RIGHT]
+
+
+def _enemy_heads(game: SplixGame, pid: int) -> np.ndarray:
+    p = game.players[pid]
+    heads = [q.pos for q in game.players
+             if q.alive and q.pid != pid and max(abs(q.pos[0] - p.pos[0]), abs(q.pos[1] - p.pos[1])) <= VIEW]
+    return np.array(heads, dtype=np.int64).reshape(-1, 2)
+
+
+def escape_margin(game: SplixGame, pid: int) -> float:
+    """(nearest visible enemy head's distance to my trail or head) - (my distance home)."""
+    p = game.players[pid]
+    heads = _enemy_heads(game, pid)
+    if not len(heads):
+        return 99.0
+    exposed = np.array([*p.trail, p.pos], dtype=np.int64).reshape(-1, 2)
+    reach = int(np.abs(exposed[:, None, :] - heads[None, :, :]).sum(2).min())
+    own = game.owner == pid
+    if own[p.pos]:
+        home = 0
+    else:
+        cells = np.argwhere(own)
+        home = int(np.abs(cells - np.array(p.pos)).sum(1).min()) if len(cells) else 99
+    return float(reach - home)
+
+
+def enemy_near(game: SplixGame, pid: int, radius: int) -> bool:
+    heads = _enemy_heads(game, pid)
+    p = game.players[pid]
+    return bool(len(heads)) and int(np.abs(heads - np.array(p.pos)).sum(1).min()) <= radius
+
+
+class OptionRunner:
+    """Carries out one option for one player. ``act`` returns a primitive
+    action each step, or None once the option is over."""
+
+    def __init__(self, option: int, rng: np.random.Generator, lag: float = 0.0, can_pause: bool = True,
+                 safety: float = 2.0, lag_slack: float = 30.0):
+        self.kind, *self.params = OPTIONS[option]
+        self.option = option
+        self.rng = rng
+        self.can_pause = can_pause
+        self.threshold = safety + lag_slack * lag
+        self.steps = 0
+        self.phase: str | None = None
+        self.left_home = False
+        self.done = False
+        self.aborted = False  # the safety rule fired
+
+    # -- helpers ----------------------------------------------------------------
+    def _near(self, game, pid, radius=2):
+        n = game.size
+        m = np.zeros((n, n), bool)
+        for r, c in _enemy_heads(game, pid):
+            m[max(0, r - radius) : r + radius + 1, max(0, c - radius) : c + radius + 1] = True
+        return m
+
+    def _route(self, game, pid, goal, blocked):
+        near = self._near(game, pid)
+        own = game.owner == pid
+        a = bfs_first_action(game, pid, goal & ~near, blocked | (near & ~own), ORDER)
+        if a is None:
+            a = bfs_first_action(game, pid, goal, blocked, ORDER)
+        return a
+
+    def _go_home(self, game, pid):
+        self.phase = "home"
+        a = self._route(game, pid, game.owner == pid, game.trail == pid)
+        if a is None:
+            opts = safe_actions(game, pid)
+            return int(self.rng.choice(opts)) if opts else STRAIGHT
+        return a
+
+    def _checked(self, game, pid, a):
+        """Use action a unless it is fatal (wall / own trail); then head home."""
+        if a is None or not game.is_safe(pid, a):
+            return self._go_home(game, pid)
+        return a
+
+    def _step_inside(self, game, pid):
+        """One safe step that stays on my land (used when an option has nothing to do)."""
+        self.done = True
+        for a in ORDER:
+            if game.is_safe(pid, a) and game.owner[game.next_cell(pid, a)[0]] == pid:
+                return a
+        opts = safe_actions(game, pid)
+        return opts[0] if opts else STRAIGHT
+
+    # -- main -------------------------------------------------------------------
+    def act(self, game: SplixGame, pid: int) -> int | None:
+        if self.done:
+            return None
+        p = game.players[pid]
+        if not p.alive:
+            self.done = True
+            return None
+        at_home = bool(game.owner[p.pos] == pid)
+        if not at_home:
+            self.left_home = True
+        elif self.left_home:  # back on my land after a trip: the loop closed
+            self.done = True
+            return None
+        if self.steps >= MAX_OPTION_STEPS and at_home:
+            self.done = True
+            return None
+        self.steps += 1
+        if not at_home and (self.steps > MAX_OPTION_STEPS or
+                            (p.trail and escape_margin(game, pid) <= self.threshold)):
+            if self.phase != "home":
+                self.aborted = True
+            return self._go_home(game, pid)
+        if self.phase == "home":
+            return self._go_home(game, pid)
+        return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
+
+    # -- the options -----------------------------------------------------------
+    def _opt_loop(self, game, pid, at_home):
+        out, side, turn = self.params
+        if at_home:  # leave on the side away from enemies
+            outside = (game.owner != pid) & (game.trail < 0)
+            return self._checked(game, pid, self._route(game, pid, outside, np.zeros_like(outside)))
+        if self.phase is None:  # first tile outside: plan the rectangle from here
+            self.phase, self.left = "out", out - 1
+        if self.phase == "out":
+            if self.left > 0:
+                self.left -= 1
+                return self._checked(game, pid, STRAIGHT)
+            self.phase, self.left = "side", side - 1
+            return self._checked(game, pid, turn)
+        if self.phase == "side":
+            if self.left > 0:
+                self.left -= 1
+                return self._checked(game, pid, STRAIGHT)
+        return self._go_home(game, pid)
+
+    def _opt_home(self, game, pid, at_home):
+        return self._step_inside(game, pid) if at_home else self._go_home(game, pid)
+
+    def _opt_reclaim(self, game, pid, at_home):
+        from .obs import cheap_land
+
+        p = game.players[pid]
+        if self.phase is None:
+            cheap = cheap_land(game, game.owner == pid, p.pos)
+            if not cheap.any():  # nothing cheap nearby: a small loop instead
+                self.kind, self.params = "loop", [3, 3, TURN_LEFT]
+                return self._opt_loop(game, pid, at_home)
+            self.target, self.phase = cheap, "go"
+        if self.phase == "go":
+            if not at_home and self.target[p.pos]:
+                return self._go_home(game, pid)
+            return self._checked(game, pid, self._route(game, pid, self.target, game.trail == pid))
+        return self._go_home(game, pid)
+
+    def _opt_attack(self, game, pid, at_home):
+        p = game.players[pid]
+        enemy_trail = (game.trail != EMPTY) & (game.trail != pid)
+        if enemy_trail.any() and self.steps <= 40:
+            cells = np.argwhere(enemy_trail)
+            if int(np.abs(cells - np.array(p.pos)).sum(1).min()) <= VIEW:
+                a = bfs_first_action(game, pid, enemy_trail, game.trail == pid, ORDER)
+                if a is not None and game.is_safe(pid, a):
+                    return a
+        return self._step_inside(game, pid) if at_home else self._go_home(game, pid)
+
+    def _opt_ambush(self, game, pid, at_home):
+        # wait on my land while an enemy is close: one step per decision
+        if not at_home:
+            return self._go_home(game, pid)
+        if self.can_pause and enemy_near(game, pid, 8):
+            self.done = True
+            return PAUSE
+        return self._step_inside(game, pid)
+
+
+# ---------------------------------------------------------------- env and actor
+import gymnasium as gym  # noqa: E402
+
+
+class OptionsEnv(gym.Wrapper):
+    """SplixEnv where each action is an option (index into OPTIONS).
+
+    ``step`` runs the option to its end (or the episode's) and returns the
+    discounted sum of rewards; ``info["option_disc"]`` is gamma ** k for the
+    k steps it took, the discount to bootstrap with.
+    """
+
+    def __init__(self, env, gamma: float = 0.995, safety: float = 2.0, lag_slack: float = 30.0):
+        super().__init__(env)
+        self.gamma = gamma
+        self.safety = safety
+        self.lag_slack = lag_slack
+        self.action_space = gym.spaces.Discrete(N_OPTIONS)
+        self._rng = np.random.default_rng(0)
+
+    def reset(self, **kw):
+        obs, info = self.env.reset(**kw)
+        self._rng = np.random.default_rng(int(self.env.np_random.integers(2**31)))
+        return obs, info
+
+    def step(self, option):
+        base = self.env.unwrapped
+        run = OptionRunner(int(option), self._rng, lag=getattr(base, "lag_prob", 0.0),
+                           can_pause=getattr(base, "allow_pause", False), safety=self.safety, lag_slack=self.lag_slack)
+        total, disc, k = 0.0, 1.0, 0
+        obs, term, trunc, info = None, False, False, {}
+        while True:
+            a = run.act(base.game, 0)
+            if a is None:
+                if k > 0:
+                    break
+                a = STRAIGHT if base.game.is_safe(0, STRAIGHT) else (safe_actions(base.game, 0) or [STRAIGHT])[0]
+            obs, r, term, trunc, info = self.env.step(a)
+            total += disc * r
+            disc *= self.gamma
+            k += 1
+            if term or trunc:
+                break
+        info = dict(info)
+        info.update(option_disc=disc, option_steps=k, option_aborted=run.aborted)
+        return obs, total, term, trunc, info
+
+
+class OptionsActor:
+    """Plays an options agent tile by tile, so evaluate / watch / live / frozen
+    opponents can use it like any other actor."""
+
+    def __init__(self, agent, name: str = "options", deterministic: bool = True):
+        self.agent = agent
+        self.name = name
+        self.deterministic = deterministic
+        cfg = agent.options or {}
+        self.safety = cfg.get("safety", 2.0)
+        self.lag_slack = cfg.get("lag_slack", 30.0)
+        self.run: OptionRunner | None = None
+        self.rng = np.random.default_rng(0)
+        self.chosen: list[int] = []
+
+    def reset(self, env, seed: int) -> None:
+        self.run = None
+        self.rng = np.random.default_rng(seed)
+
+    def act(self, env, obs=None, pid: int = 0) -> int:
+        from .obs import build_obs
+
+        game = env.game
+        if self.run is not None:
+            a = self.run.act(game, pid)
+            if a is not None:
+                return a
+        o = build_obs(game, pid, self.agent.obs_config)
+        option = int(self.agent.act(o, deterministic=self.deterministic))
+        self.chosen.append(option)
+        lag = float(getattr(game, "lag_estimate", 0.0))
+        self.run = OptionRunner(option, self.rng, lag=lag, can_pause=getattr(env, "allow_pause", True),
+                                safety=self.safety, lag_slack=self.lag_slack)
+        a = self.run.act(game, pid)
+        if a is None:
+            a = STRAIGHT if game.is_safe(pid, STRAIGHT) else (safe_actions(game, pid) or [STRAIGHT])[0]
+        return a
+
+
+def make_options_env(gamma: float = 0.995, safety: float = 2.0, lag_slack: float = 30.0, **env_kwargs):
+    """Picklable factory for vector envs."""
+    from .env import SplixEnv
+
+    return OptionsEnv(SplixEnv(**env_kwargs), gamma=gamma, safety=safety, lag_slack=lag_slack)

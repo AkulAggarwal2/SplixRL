@@ -60,6 +60,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--steps", type=int, default=200_000, help="real environment steps")
     p.add_argument("--device", default="auto", help="auto = cuda, else mps (Apple GPU), else cpu")
     p.add_argument("--num-envs", type=int, default=1, help="games played at once in worker processes")
+    p.add_argument("--options", action="store_true", help="learn over options (plans) instead of per-tile moves")
+    p.add_argument("--option-safety", type=float, default=2.0, help="abort a plan when the escape margin falls to this ...")
+    p.add_argument("--option-lag-slack", type=float, default=30.0, help="... plus this times the lag estimate")
+    p.add_argument("--lag-feature", action="store_true", help="give the agent an estimate of the lag")
     # env
     p.add_argument("--size", type=int, default=20)
     p.add_argument("--max-steps", type=int, default=500)
@@ -140,7 +144,7 @@ def load_extended(module: torch.nn.Module, state: dict, exact_only: bool = False
     return notes
 
 
-def load_by_name(q: torch.nn.Module, state: dict, old_obs, new_obs) -> list[str]:
+def load_by_name(q: torch.nn.Module, state: dict, old_obs, new_obs, fresh_output: bool = False) -> list[str]:
     """Warm-start a Q-network whose inputs changed (curriculum stages).
 
     Input channels of the first conv layer and ``vec`` columns of the first
@@ -155,8 +159,12 @@ def load_by_name(q: torch.nn.Module, state: dict, old_obs, new_obs) -> list[str]
     old_vec, new_vec = list(old_obs.vec_features), list(new_obs.vec_features)
     conv0 = "conv.0.weight"
     first_lin = "body.0.weight" if "body.0.weight" in own else "head.0.weight"
+    output_layers = {"head.2.weight", "head.2.bias", "advantage.weight", "advantage.bias"}
     for name, new in own.items():
         old = state.get(name)
+        if fresh_output and name in output_layers:
+            notes.append(f"{name}: fresh (new kind of action)")
+            continue
         if old is None:
             notes.append(f"{name}: new")
             continue
@@ -208,6 +216,12 @@ def train(args: argparse.Namespace) -> Path:
     (run / "checkpoints").mkdir(parents=True, exist_ok=True)
     cfg = dataclass_from_args(DynaConfig, args)
     cfg.n_actions = 4 if args.allow_pause else 3
+    if args.options:
+        from .options import N_OPTIONS
+
+        cfg.n_actions = N_OPTIONS
+        cfg.n_step = 1  # each transition is already a whole option
+        cfg.planning_updates = 0
     reward = RewardConfig.preset(args.reward_preset)
     for k, v in vars(dataclass_from_args(RewardConfig, args, prefix="reward_")).items():
         if getattr(args, "reward_" + k) is not None:  # explicit flags win over the preset
@@ -232,6 +246,7 @@ def train(args: argparse.Namespace) -> Path:
         escape_features=args.escape_features,
         allow_pause=args.allow_pause,
         memory=args.memory,
+        lag_feature=args.lag_feature,
         league_prob=args.league_prob,
         max_pause=args.max_pause,
         reward=reward.to_dict(),
@@ -264,7 +279,8 @@ def train(args: argparse.Namespace) -> Path:
     torch.manual_seed(args.seed)
     torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
     env = SplixEnv(**env_kwargs)
-    cfg.n_actions = int(env.action_space.n)
+    if not args.options:
+        cfg.n_actions = int(env.action_space.n)
     grid_shape = env.observation_space["grid"].shape
     n_vec = env.observation_space["vec"].shape[0]
     agent = DynaAgent(env.obs_config, grid_shape, n_vec, cfg, device=pick_device(args.device), seed=args.seed)
@@ -272,7 +288,9 @@ def train(args: argparse.Namespace) -> Path:
         ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
         old_obs = ObsConfig.from_dict(ck["obs_config"])
         if old_obs != env.obs_config:  # different inputs: line them up by name
-            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config)
+            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config, fresh_output=args.options)
+        elif args.options and ck.get("options") is None:  # same inputs, new kind of output
+            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config, fresh_output=True)
         else:
             notes = load_extended(agent.q, ck["q"])
         agent.q_target.load_state_dict(agent.q.state_dict())
@@ -280,7 +298,10 @@ def train(args: argparse.Namespace) -> Path:
             notes += load_extended(agent.model, ck["model"], exact_only=True)
         agent.sync_actor()
         print(f"initialised from {args.init_from}" + (f" ({'; '.join(notes)})" if notes else ""), flush=True)
-    real = MultiBuffer(max(1, args.num_envs), cfg.buffer_size, grid_shape, n_vec, seed=args.seed)
+    real = MultiBuffer(max(1, args.num_envs), cfg.buffer_size, grid_shape, n_vec, seed=args.seed,
+                       gamma=cfg.gamma if args.options else None)
+    if args.options:
+        agent.options = {"safety": args.option_safety, "lag_slack": args.option_lag_slack}
     imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1)
 
     train_log = CsvLogger(run / "train.csv", TRAIN_FIELDS)
@@ -303,7 +324,13 @@ def train(args: argparse.Namespace) -> Path:
     # Several games at once in worker processes (--num-envs). Each game keeps its
     # own replay buffer, so n-step returns never mix games.
     N = max(1, args.num_envs)
-    make = functools.partial(SplixEnv, **env_kwargs)
+    if args.options:
+        from .options import make_options_env
+
+        make = functools.partial(make_options_env, gamma=cfg.gamma, safety=args.option_safety,
+                                 lag_slack=args.option_lag_slack, **env_kwargs)
+    else:
+        make = functools.partial(SplixEnv, **env_kwargs)
     same_step = gym.vector.AutoresetMode.SAME_STEP
     if N > 1:
         envs = gym.vector.AsyncVectorEnv([make] * N, autoreset_mode=same_step)
@@ -330,8 +357,10 @@ def train(args: argparse.Namespace) -> Path:
         final_info = info.get("final_info", {})
         for i in range(N):
             nxt = final_obs[i] if done[i] else {"grid": nobs["grid"][i], "vec": nobs["vec"][i]}
+            src = final_info if done[i] else info
+            disc = float(src["option_disc"][i]) if args.options else None
             real.bufs[i].add(obs["grid"][i], obs["vec"][i], int(actions[i]), float(r[i]),
-                             nxt["grid"], nxt["vec"], float(term[i]), end=bool(done[i]))
+                             nxt["grid"], nxt["vec"], float(term[i]), end=bool(done[i]), disc=disc)
             ep_ret[i] += r[i]
             if done[i]:
                 fi = {k: v[i] for k, v in final_info.items() if not k.startswith("_")}

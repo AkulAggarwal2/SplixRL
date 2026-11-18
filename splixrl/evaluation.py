@@ -83,9 +83,14 @@ def make_actor(spec: str, device: str = "cpu", act_margin: float = 0.0) -> Actor
     from .agents import load_agent
 
     agent = load_agent(spec, device=device)
+    name = opponent_label("frozen:" + spec)[len("frozen:") :]
+    if getattr(agent, "options", None) is not None:
+        from .options import OptionsActor
+
+        return OptionsActor(agent, name=name)
     if act_margin and hasattr(agent, "act_margin"):
         agent.act_margin = act_margin
-    return AgentActor(agent, name=opponent_label("frozen:" + spec)[len("frozen:") :])
+    return AgentActor(agent, name=name)
 
 
 def run_episode(actor: Actor, env: SplixEnv, seed: int, opponents: Sequence | None = None) -> dict:
@@ -124,7 +129,8 @@ def evaluate(
     """``episodes`` games against each opponent spec (all seats get that spec)."""
     kwargs = dict(env_kwargs)
     agent_cfg = getattr(getattr(actor, "agent", None), "cfg", None)
-    if agent_cfg is not None and getattr(agent_cfg, "n_actions", 3) > 3:
+    if getattr(getattr(actor, "agent", None), "options", None) is not None or (
+            agent_cfg is not None and getattr(agent_cfg, "n_actions", 3) > 3):
         kwargs["allow_pause"] = True  # an agent that can pause needs an env that allows it
     n_opp = kwargs.get("n_opponents", 1)
     rows = []
@@ -236,7 +242,13 @@ class TrainingEvaluator:
         self.log = CsvLogger(Path(run_dir) / "eval.csv", EVAL_FIELDS)
 
     def __call__(self, agent, step: int, verbose: bool = True) -> list[dict]:
-        rows = evaluate(AgentActor(agent, getattr(agent, "algo", "agent")), self.env_kwargs, self.opponents, self.episodes, self.seed)
+        if getattr(agent, "options", None) is not None:
+            from .options import OptionsActor
+
+            actor = OptionsActor(agent, "options")
+        else:
+            actor = AgentActor(agent, getattr(agent, "algo", "agent"))
+        rows = evaluate(actor, self.env_kwargs, self.opponents, self.episodes, self.seed)
         summary = summarize(rows, keys=("opponent",))
         for s in summary:
             self.log.log({"step": step, **s})

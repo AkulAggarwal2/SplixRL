@@ -116,6 +116,7 @@ class LiveState:
         self.my_states: list[tuple[float, int, int, int]] = []  # every state update the server sent about us
         self.minimap = np.zeros((MINIMAP_SIZE, MINIMAP_SIZE), bool)  # [y, x]
         self.obs_memory: dict = {}
+        self.lag_estimate = 0.03  # share of turns that land late; updated from turn confirmations
 
     # -- messages ---------------------------------------------------------
     def handle(self, m: bytes, now: float) -> None:
@@ -236,6 +237,7 @@ class LiveState:
         g.land_hint = self.land_hint()  # far-away land the client only knows from the minimap
         g.obs_memory = self.obs_memory  # memory channels persist across per-tile snapshots
         g.clock = steps
+        g.lag_estimate = self.lag_estimate
 
         def to_rc(x, y):
             return y - 1, x - 1
@@ -571,6 +573,8 @@ async def play_life(server: str, actor, name: str, color: int, max_steps: int, v
                     elif pending is None or (sx, sy) != pending["pos"]:
                         lag["corrections"] += 1  # the server moved us somewhere we didn't predict
                 seen_states = len(state.my_states)
+                if lag["turns"] >= 10:  # running estimate for lag-aware agents and option safety
+                    state.lag_estimate = min(0.2, (lag["resent"] + 2 * lag["lost"] + 1) / (lag["turns"] + 20))
                 if pending and now > pending["eta"] + 0.6 * TILE_SEC * pending["tries"]:
                     if pending["tries"] < 3:
                         await ws.send(pending["msg"])

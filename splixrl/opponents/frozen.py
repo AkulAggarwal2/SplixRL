@@ -30,5 +30,18 @@ class FrozenOpponent(Opponent):
         super().reset(game, pid, rng)
 
     def act(self, game: SplixGame, pid: int) -> int:
+        if getattr(self.agent, "options", None) is not None:  # an options agent plays through its controllers
+            if not hasattr(self, "_options_actor"):
+                from ..options import OptionsActor
+
+                self._options_actor = OptionsActor(self.agent, deterministic=self.deterministic)
+                self._options_actor.reset(None, int(self.rng.integers(2**31)) if hasattr(self, "rng") else 0)
+
+            class _G:  # minimal env view for the actor
+                pass
+
+            view = _G()
+            view.game, view.allow_pause = game, True
+            return int(self._options_actor.act(view, None, pid))
         obs = build_obs(game, pid, self.agent.obs_config)
         return int(self.agent.act(obs, deterministic=self.deterministic))

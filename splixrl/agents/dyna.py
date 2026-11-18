@@ -224,8 +224,11 @@ def to_torch(arrays, device) -> tuple[torch.Tensor, ...]:
 
 
 class ReplayBuffer:
-    def __init__(self, capacity: int, grid_shape, n_vec: int, seed: int = 0):
+    def __init__(self, capacity: int, grid_shape, n_vec: int, seed: int = 0, gamma: float | None = None):
         self.capacity = capacity
+        # per-transition bootstrap discount; set for options (gamma ** option length)
+        self.disc = np.full(capacity, np.nan if gamma is None else gamma, np.float32)
+        self.store_disc = gamma is not None
         self.grid = np.zeros((capacity, *grid_shape), np.uint8)
         self.vec = np.zeros((capacity, n_vec), np.float32)
         self.action = np.zeros(capacity, np.int64)
@@ -238,7 +241,7 @@ class ReplayBuffer:
         self.ptr = 0
         self.rng = np.random.default_rng(seed)
 
-    def add(self, grid, vec, action, reward, next_grid, next_vec, done, end=None) -> None:
+    def add(self, grid, vec, action, reward, next_grid, next_vec, done, end=None, disc=None) -> None:
         """Add one transition or a batch (leading dim). ``end`` marks the last
         step of an episode (terminated or truncated); defaults to ``done``."""
         grid = np.asarray(grid)
@@ -256,13 +259,16 @@ class ReplayBuffer:
         self.next_vec[idx] = next_vec
         self.done[idx] = done
         self.end[idx] = np.asarray(done, bool) if end is None else end
+        if disc is not None:
+            self.disc[idx] = disc
         self.ptr = int((self.ptr + n) % self.capacity)
         self.size = min(self.size + n, self.capacity)
 
     def sample_np(self, n: int) -> tuple[np.ndarray, ...]:
         idx = self.rng.integers(0, self.size, size=n)
-        return (self.grid[idx], self.vec[idx], self.action[idx], self.reward[idx],
-                self.next_grid[idx], self.next_vec[idx], self.done[idx])
+        out = (self.grid[idx], self.vec[idx], self.action[idx], self.reward[idx],
+               self.next_grid[idx], self.next_vec[idx], self.done[idx])
+        return out + (self.disc[idx],) if self.store_disc else out
 
     def sample(self, n: int, device) -> tuple[torch.Tensor, ...]:
         return to_torch(self.sample_np(n), device)
@@ -306,8 +312,9 @@ class MultiBuffer:
     """One ReplayBuffer per parallel game, sampled as one. Keeps each game's
     steps contiguous, so n-step returns stay within a game."""
 
-    def __init__(self, n: int, capacity: int, grid_shape, n_vec: int, seed: int = 0):
-        self.bufs = [ReplayBuffer(max(1000, capacity // n), grid_shape, n_vec, seed=seed + i) for i in range(n)]
+    def __init__(self, n: int, capacity: int, grid_shape, n_vec: int, seed: int = 0, gamma: float | None = None):
+        self.bufs = [ReplayBuffer(max(1000, capacity // n), grid_shape, n_vec, seed=seed + i, gamma=gamma)
+                     for i in range(n)]
         self.rng = np.random.default_rng(seed + 991)
 
     @property
@@ -457,7 +464,7 @@ class DynaAgent(Agent):
         return loss.detach()  # a tensor: calling .item() every update would stall the GPU
 
     def model_update(self, batch, with_metrics: bool = False) -> dict[str, float]:
-        grid, vec, action, reward, ngrid, nvec, done = batch
+        grid, vec, action, reward, ngrid, nvec, done = batch[:7]
         logits, pvec, prew, pdone = self.model(align(grid, action, self.obs_config), vec, action)
         alive = 1.0 - done  # the obs after a death says nothing useful; only learn "done" there
         grid_loss = (F.binary_cross_entropy_with_logits(logits, ngrid, reduction="none").mean((1, 2, 3)) * alive).sum() / alive.sum().clamp(min=1)
@@ -517,8 +524,12 @@ class DynaAgent(Agent):
         return added
 
     # -- persistence -----------------------------------------------------------
+    options: dict | None = None  # set for an options agent (see splixrl.options)
+
     def save(self, path: str, extra: dict | None = None) -> None:
         self.sync_actor()
+        if self.options is not None:
+            extra = {**(extra or {}), "options": self.options}
         torch.save(
             {
                 "algo": self.algo,
@@ -546,5 +557,6 @@ class DynaAgent(Agent):
         agent.q.load_state_dict(ck["q"])
         agent.q_target.load_state_dict(ck["q"])
         agent.model.load_state_dict(ck["model"])
+        agent.options = ck.get("options")
         agent.sync_actor()
         return agent

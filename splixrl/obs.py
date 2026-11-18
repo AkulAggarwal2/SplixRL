@@ -121,6 +121,7 @@ class ObsConfig:
     escape_features: bool = False
     pause_feature: bool = False
     memory: int = 0
+    lag_feature: bool = False
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
@@ -186,6 +187,8 @@ class ObsConfig:
             v += ("paused",)
         if self.memory:
             v += MEMORY_FEATURES
+        if self.lag_feature:
+            v += ("lag_estimate",)
         return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
@@ -329,6 +332,10 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
             vals += [len(cells) / DIST_NORM, d[i] / DIST_NORM, f / DIST_NORM, r / DIST_NORM]
         else:
             vals += [0.0, FAR, 0.0, 0.0]
+    if cfg.lag_feature:
+        # fraction of turns that land late: the env's setting in simulation,
+        # the client's running estimate on a server (x10, so 0.1 -> 1)
+        vals.append(10.0 * float(getattr(game, "lag_estimate", 0.0)))
     return [max(-FAR, min(FAR, float(v))) for v in vals]
 
 

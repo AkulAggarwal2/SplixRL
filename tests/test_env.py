@@ -726,3 +726,43 @@ def test_pause_is_free_only_near_enemies():
     opp.pos = (me.pos[0], me.pos[1] + 3 if me.pos[1] < 36 else me.pos[1] - 3)
     _, r_near, *_ = env.step(PAUSE)
     assert r_far == pytest.approx(-0.5) and r_near == pytest.approx(0.0)
+
+
+def _options_agent(env_kw):
+    from splixrl.options import N_OPTIONS
+
+    env = SplixEnv(**env_kw)
+    agent = DynaAgent(env.obs_config, env.observation_space["grid"].shape, env.observation_space["vec"].shape[0],
+                      DynaConfig(n_actions=N_OPTIONS))
+    agent.options = {"safety": 2.0, "lag_slack": 30.0}
+    return env, agent
+
+
+def test_options_env_runs_whole_plans_and_discounts():
+    from splixrl.options import N_OPTIONS, OptionsEnv
+
+    env = OptionsEnv(SplixEnv(size=30, opponents=["loop"], n_opponents=2, respawn=True, allow_pause=True,
+                              max_steps=800, lag_feature=True, lag_prob=0.05), gamma=0.9)
+    obs, _ = env.reset(seed=0)
+    assert env.action_space.n == N_OPTIONS and obs["vec"][-1] == pytest.approx(0.5)  # lag 0.05, x10
+    for opt in range(N_OPTIONS):
+        obs, r, term, trunc, info = env.step(opt)
+        k = info["option_steps"]
+        assert 1 <= k <= 200 and info["option_disc"] == pytest.approx(0.9 ** k)
+        if term or trunc:
+            env.reset(seed=opt)
+
+
+def test_options_agent_save_load_evaluate_and_freeze(tmp_path):
+    kw = dict(size=24, opponents=["loop"], allow_pause=True, lag_feature=True)
+    env, agent = _options_agent(kw)
+    path = tmp_path / "opt.pt"
+    agent.save(str(path))
+    from splixrl.evaluation import make_actor
+    from splixrl.options import OptionsActor
+
+    actor = make_actor(str(path))
+    assert isinstance(actor, OptionsActor)
+    rows = evaluate(actor, dict(size=24, max_steps=200, lag_feature=True), ["loop", f"frozen:{path}"], 2)
+    assert len(rows) == 4 and all(r["length"] > 0 for r in rows)
+    assert len(actor.chosen) > 2  # it picked several options per game, not one per tile
