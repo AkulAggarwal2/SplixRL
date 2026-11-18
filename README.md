@@ -204,6 +204,8 @@ Training straight in the full setting (up to 10 opponents including hunters and 
 * **B:** 24–40 boards, 1–4 opponents (loop, chaser, greedy, invader, jittered), up to 5% lag, all observation options and pausing. Reward: v2 + kill 10 + rank bonus 10. 400k steps.
 * **C:** the full setting (24–72 boards, 2–10 opponents incl. hunters and stalkers, up to 10% lag, self-play league). 1M steps.
 
+Hand-off from B to C (`runs/curriculum/handoff.sh`): training-time evaluation uses only 10 games per opponent, so `best.pt` can be a lucky early checkpoint. Partway through B, `best.pt` was still B's step-0 checkpoint. After B finishes, `python -m splixrl.select_best` re-evaluates every second checkpoint on the same seeds with 20 games per opponent, and C starts from the winner.
+
 `--init-from` matches inputs **by name** when they differ (`load_by_name`): conv input channels and `vec` features the old agent had keep their weights; new ones start at zero; the output grows for the pause action. The grown network computes exactly the old agent's Q-values on the inputs they share (`test_curriculum_warm_start_matches_inputs_by_name`).
 
 At step 0 of B, before any new training, the transferred agent peaks at 73–117 cells, lives 175–433 steps and gets 0.4–7.5 kills a game in the new setting.

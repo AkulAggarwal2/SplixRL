@@ -120,6 +120,9 @@ def evaluate(
 ) -> list[dict]:
     """``episodes`` games against each opponent spec (all seats get that spec)."""
     kwargs = dict(env_kwargs)
+    agent_cfg = getattr(getattr(actor, "agent", None), "cfg", None)
+    if agent_cfg is not None and getattr(agent_cfg, "n_actions", 3) > 3:
+        kwargs["allow_pause"] = True  # an agent that can pause needs an env that allows it
     n_opp = kwargs.get("n_opponents", 1)
     rows = []
     for spec in opponents:
