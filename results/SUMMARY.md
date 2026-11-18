@@ -65,3 +65,12 @@ It improved a lot against loop and greedy, but got **worse against the trail-hun
 * The environment rules were checked against the open-source Splix server code (`gameServer/src/gameplay/Player.js`).
 * Speed went from 27 to 300+ steps/s on the full setting, via numba pathfinding, capped spawns, per-seat league sampling and parallel games.
 * A NaN bug from asynchronous GPU copies was caught by noticing identical evaluations, and is now guarded (`skipped_updates`).
+
+## 6. Fine-tuning erodes the agent (seen three times)
+
+Continuing training past an early peak consistently made agents worse:
+* the 20×20 runs after ~50k steps;
+* curriculum stage C: peak land vs greedy 251 → 72 cells over 350k steps;
+* fine-tune B2 (turn/pause costs, learning rate 2.5e-4). It did fix the behavior: idle pausing 20% → 1–8% of steps, zigzag turns 43% → 20–33%. But mean return fell 25.8 → 9.6 and peak land 110 → 71 (80 games per checkpoint).
+
+Fine-tune B3 repeats B2 with learning rate 5e-5 and a 2.5× slower target network, to test whether a gentler learner adds behavior without erasing what it knows.
