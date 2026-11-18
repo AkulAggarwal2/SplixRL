@@ -120,3 +120,5 @@ With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunter
 | 9 | 101.9 | 384 | 1104 | 32% | 20/60 | 39.8 | 83.4 |
 
 6 tiles is now the default.
+
+**Options run C** (adds open_loop and safe_loop) vs run B, both with the 6-tile cushion and remembered enemies, same 60 hard games: return 119.1 vs 110.6, survival 48% vs 40%, kills 21.0 vs 17.9, peak land 359 vs 385. C is now `BEST_OPTIONS_AGENT.pt` (B kept as `_B.pt`). Most decisions are short ones (home 36%, ambush 34%), and the adaptive safe_loop is used 3% of the time. Run D adds steal_edge (17 options).
