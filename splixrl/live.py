@@ -726,7 +726,7 @@ async def amain(args) -> None:
             await asyncio.sleep(1.0)  # let the bots spawn first
             window = LiveWindow(f"SplixRL live - {args.name}") if args.show and relay is None else None
             for life in range(args.lives):
-                rows.append(await play_life(args.server, make_actor(args.actor), args.name, colors[0], args.max_steps,
+                rows.append(await play_life(args.server, make_actor(args.actor, act_margin=args.act_margin), args.name, colors[0], args.max_steps,
                                             verbose=True, window=window, life=life, relay=relay))
         else:
             await asyncio.Event().wait()  # bots only: run until Ctrl-C
@@ -760,6 +760,7 @@ def main(argv=None) -> None:
     ap.add_argument("--out", help="CSV with one row per life")
     ap.add_argument("--serve-client", action="store_true", help="serve the web client at http://127.0.0.1:8000")
     ap.add_argument("--show", action="store_true", help="open a window showing the game as the actor sees it")
+    ap.add_argument("--act-margin", type=float, default=0.1, help="tie-breaker for trained agents: prefer straight, pause only when clearly better (0 = plain argmax)")
     ap.add_argument("--web", action="store_true", help="open splix.io and let it draw the game while the actor steers")
     args = ap.parse_args(argv)
     if args.serve_client:

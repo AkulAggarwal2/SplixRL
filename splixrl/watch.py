@@ -24,11 +24,15 @@ def main(argv=None) -> None:
     ap.add_argument("--episodes", type=int, default=1)
     ap.add_argument("--fps", type=float, default=8.0)
     ap.add_argument("--gif", help="write a GIF instead of opening a window")
+    ap.add_argument("--act-margin", type=float, default=0.1, help="tie-breaker for trained agents (0 = plain argmax)")
+    ap.add_argument("--respawn", action="store_true", help="opponents come back after dying")
+    ap.add_argument("--allow-pause", action="store_true")
     ap.add_argument("--cell", type=int, default=14, help="GIF pixels per cell")
     args = ap.parse_args(argv)
 
-    env = SplixEnv(size=args.size, opponents=args.opponents, n_opponents=args.n_opponents, max_steps=args.max_steps)
-    actor = make_actor(args.actor)
+    env = SplixEnv(size=args.size, opponents=args.opponents, n_opponents=args.n_opponents, max_steps=args.max_steps,
+                   respawn=args.respawn, allow_pause=args.allow_pause)
+    actor = make_actor(args.actor, act_margin=args.act_margin)
 
     if args.gif:
         from PIL import Image

@@ -385,19 +385,42 @@ class DynaAgent(Agent):
         if self.q_actor is not self.q:
             self.q_actor.load_state_dict({k: v.detach().cpu() for k, v in self.q.state_dict().items()})
 
+    # Tie-breaking when acting (not in training targets). When moves are nearly
+    # tied the argmax flips with tiny noise, which shows up as staircase trails
+    # (40% of turns undid the previous turn) and needless pauses. With a margin
+    # m: go straight if it is within m of the best move, and only pause when
+    # pausing beats every move by more than m.
+    act_margin: float = 0.0
+
+    def _pick(self, q: torch.Tensor) -> torch.Tensor:
+        best = q.argmax(1)
+        m = self.act_margin
+        if m <= 0:
+            return best
+        top = q.gather(1, best[:, None]).squeeze(1)
+        choice = torch.where(q[:, STRAIGHT] >= top - m, torch.full_like(best, STRAIGHT), best)
+        if q.shape[1] > PAUSE:
+            moves = q[:, :PAUSE]
+            best_move = moves.argmax(1)
+            pause_clear = q[:, PAUSE] > moves.max(1).values + m
+            straight_ok = moves[:, STRAIGHT] >= moves.max(1).values - m
+            fallback = torch.where(straight_ok, torch.full_like(best, STRAIGHT), best_move)
+            choice = torch.where((best == PAUSE) & ~pause_clear, fallback, choice)
+        return choice
+
     @torch.no_grad()
     def act(self, obs, deterministic: bool = True, epsilon: float = 0.0) -> int:
         if not deterministic and self.rng.random() < epsilon:
             return int(self.rng.integers(self.cfg.n_actions))
         grid, vec = obs_to_torch(obs, "cpu")
-        return int(self.q_actor(grid, vec).argmax(1).item())
+        return int(self._pick(self.q_actor(grid, vec)).item())
 
     @torch.no_grad()
     def act_batch(self, obs: dict, epsilon: float = 0.0) -> np.ndarray:
         """Epsilon-greedy actions for a batch of observations (leading dim)."""
         grid = torch.as_tensor(obs["grid"], dtype=torch.float32)
         vec = torch.as_tensor(obs["vec"], dtype=torch.float32)
-        actions = self.q_actor(grid, vec).argmax(1).numpy()
+        actions = self._pick(self.q_actor(grid, vec)).numpy()
         explore = self.rng.random(len(actions)) < epsilon
         actions[explore] = self.rng.integers(self.cfg.n_actions, size=int(explore.sum()))
         return actions

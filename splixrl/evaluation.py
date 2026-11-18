@@ -74,7 +74,7 @@ class BotActor(Actor):
         return int(self.bot.act(env.game, 0))
 
 
-def make_actor(spec: str, device: str = "cpu") -> Actor:
+def make_actor(spec: str, device: str = "cpu", act_margin: float = 0.0) -> Actor:
     """Bot name (``loop``, ``random`` ...) or path to a checkpoint (``frozen:`` optional)."""
     if spec.startswith("frozen:"):
         spec = spec[len("frozen:") :]
@@ -82,7 +82,10 @@ def make_actor(spec: str, device: str = "cpu") -> Actor:
         return BotActor(spec)
     from .agents import load_agent
 
-    return AgentActor(load_agent(spec, device=device), name=opponent_label("frozen:" + spec)[len("frozen:") :])
+    agent = load_agent(spec, device=device)
+    if act_margin and hasattr(agent, "act_margin"):
+        agent.act_margin = act_margin
+    return AgentActor(agent, name=opponent_label("frozen:" + spec)[len("frozen:") :])
 
 
 def run_episode(actor: Actor, env: SplixEnv, seed: int, opponents: Sequence | None = None) -> dict:

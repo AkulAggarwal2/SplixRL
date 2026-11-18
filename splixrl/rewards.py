@@ -22,6 +22,12 @@ class RewardConfig:
     # tiny earns almost nothing, like the real leaderboard; dying earns nothing.
     rank_bonus: float = 0.0
     step: float = 0.0  # every step (negative = time pressure)
+    # per turn and per paused step (positive numbers are costs). A staircase
+    # trail is as long as an L-shaped one but encloses far less land; the
+    # capture reward only says so much later, after the loop closes. A small
+    # cost makes clean straight loops win unless turning or pausing buys safety.
+    turn_cost: float = 0.0
+    pause_cost: float = 0.0
     # Potential-based shaping (Ng, Harada & Russell 1999). The potential is
     # shaping * capture_per_cell * trail_length: it pays a little for
     # extending a trail and takes it back when the loop closes or the agent

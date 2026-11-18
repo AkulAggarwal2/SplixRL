@@ -244,6 +244,10 @@ class SplixEnv(gym.Env):
         r -= rc.lost_per_cell * ev.lost.get(0, 0)
         r += rc.kill * ev.kills.get(0, 0)
         r += rc.step
+        if action in (1, 2):  # TURN_LEFT / TURN_RIGHT actually taken
+            r -= rc.turn_cost
+        elif action == PAUSE:
+            r -= rc.pause_cost
 
         agent_dead = not g.players[0].alive
         opps_dead = all(not p.alive for p in g.players[1:])

@@ -43,6 +43,7 @@ def main(argv=None) -> None:
     ap.add_argument("--respawn", action="store_true")
     ap.add_argument("--target-frac", type=float, default=None)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--act-margin", type=float, default=0.0, help="tie-breaker: prefer straight / avoid pausing within this Q margin (0.1 works well)")
     ap.add_argument("--out", help="CSV of every episode")
     ap.add_argument("--summary-out", help="CSV of the summary table")
     ap.add_argument("--pivot", help="also print a matrix of this metric, e.g. win_rate")
@@ -52,7 +53,7 @@ def main(argv=None) -> None:
                       respawn=args.respawn, target_frac=args.target_frac)
     rows = []
     for spec in args.actors:
-        actor = make_actor(spec, device=args.device)
+        actor = make_actor(spec, device=args.device, act_margin=args.act_margin)
         rows += evaluate(actor, env_kwargs, args.opponents, args.episodes, args.seed)
         print(f"done: {actor.name}", flush=True)
     for r in rows:  # shorter opponent names in tables

@@ -701,3 +701,14 @@ def test_curriculum_warm_start_matches_inputs_by_name():
             q_new = new.q(*[torch.tensor(o_new[k])[None] for k in ("grid", "vec")])
         assert torch.allclose(q_old, q_new[:, :3], atol=1e-5)
         basic.step(0 if basic.game.is_safe(0, 0) else 1)
+
+
+def test_turn_and_pause_costs():
+    env = SplixEnv(size=20, opponents=["random_safe"], allow_pause=True,
+                   reward={"turn_cost": 0.5, "pause_cost": 0.25, "capture_per_cell": 0.0, "death": 0.0, "kill": 0.0})
+    env.reset(seed=0)
+    from splixrl.game import PAUSE
+    _, r_turn, *_ = env.step(TURN_LEFT)
+    _, r_pause, *_ = env.step(PAUSE)
+    _, r_straight, *_ = env.step(STRAIGHT)
+    assert r_turn == pytest.approx(-0.5) and r_pause == pytest.approx(-0.25) and r_straight == pytest.approx(0.0)
