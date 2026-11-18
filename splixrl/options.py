@@ -136,6 +136,8 @@ MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many til
 # BUDGET_SHARE * (nearest enemy reach - cushion)), so they finish as rectangles
 # instead of being aborted halfway, which captured almost nothing.
 BUDGET_SHARE = 0.8
+# Unseen enemies are assumed to be at least this many tiles inside the edge of my view (lag, and the server's view is not exactly square).
+UNSEEN_MARGIN = 5
 
 
 def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
@@ -152,11 +154,15 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
     mem = (getattr(game, "obs_memory", None) or {}).get(pid)
     if mem:
         clock = int(getattr(game, "clock", game.t))
+        # An enemy I can't see now is outside my view, so it needs at least
+        # VIEW + 1 - (how far the cell is from my head) steps to reach that cell.
+        head = np.array(game.players[pid].pos)
+        unseen = np.maximum(0, VIEW + 1 - UNSEEN_MARGIN - np.abs(exposed - head).max(1))
         for pos, t in mem.get("seen", {}).values():
             age = clock - t
             if 0 < age <= MEMORY_TRUST:
-                d = int(np.abs(exposed - np.array(pos)).sum(1).min() - MEMORY_SPEED * age)
-                d = max(0, d)
+                guess = np.abs(exposed - np.array(pos)).sum(1) - MEMORY_SPEED * age
+                d = max(0, int(np.maximum(guess, unseen).min()))
                 best = d if best is None else min(best, d)
     return best
 
@@ -421,8 +427,11 @@ class OptionRunner:
         budget = BUDGET_SHARE * (reach - self.threshold)
         if out + side <= budget:
             return out, side
-        scale = max(0.0, budget) / (out + side)
-        return max(1, int(out * scale)), max(1, int(side * scale))
+        # Same perimeter, as close to square as fits: a square captures the most
+        # land per tile of exposed trail; thin strips capture almost nothing.
+        b = int(max(0.0, budget))
+        side2 = min(side, max(2, b // 2))
+        return min(out, max(2, b - side2)), side2
 
     def _opt_home(self, game, pid, at_home):
         return self._step_inside(game, pid) if at_home else self._go_home(game, pid)

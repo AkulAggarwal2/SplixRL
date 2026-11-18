@@ -129,3 +129,13 @@ With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunter
 * In crowded games 74–86% of loops were aborted partway, capturing about 4–8 tiles each, almost always with an enemy in view. Loops are now **sized to the safety budget before they start** (out + along ≤ 0.8 × (nearest enemy reach − cushion)). That gave survival 57% vs 45%, trail-cut deaths 13 vs 15, kills 22.5 vs 19.9, at the same return (124).
 * The remembered-enemy guess was too pessimistic at full speed. At half speed (an unseen enemy covers half the distance it could), return was 117.6 vs 93.5 at full speed.
 * An **idle guard** (expand instead of waiting when no enemy is near) made it *worse*: survival 43–45% vs 57%. The `stalker` bot sees exposed trails anywhere on the map, so the simulator rewards waiting even when nobody is in view. Real players can't do that, which is a sim-to-real mismatch, and the likely reason the agent idles against humans. The fix belongs in training: a stalker limited to human-like vision and reaction time.
+
+**Thin strips** (against people the agent went a few tiles out, turned back beside its own trail and captured 2-wide strips with nobody in view). Two causes: remembered enemies were treated as possibly right next to the trail even when they would have had to be inside the agent's view to be there, and loops shrunk to fit the budget could become 1-wide. Fixes: an enemy not in view now is assumed to be at least 5 tiles inside the edge of the view (`UNSEEN_MARGIN`), and budget-sized loops are kept close to square (each side ≥ 2). Same run C agent, crowded = the 60 hard games (48×48, 6 opponents), sparse = 30 games on 96×96 with 4 opponents:
+
+| | median capture (sparse) | loops cut short (sparse) | survival (90 games) | trail-cut deaths | peak land (crowded) | return crowded / sparse |
+|---|---|---|---|---|---|---|
+| old rules | 4 tiles | 31% | 38/90 | 22 | 367 | 103.9 / 161.8 |
+| view bound at the edge, square loops | 9 | 21% | 33/90 | 28 | 399 | 105.2 / 169.7 |
+| **view bound 5 tiles in, square loops** | **10** | **18%** | **40/90** | **21** | **447** | **119.7 / 158.4** |
+
+**Run D** (adds steal_edge, 17 options) vs run C, current rules, same 60 hard games: D's best checkpoint scores return 121.5 vs 110.9 at the same survival (33%) but more trail-cut deaths (24 vs 18). It isn't clearly better, so C stays `BEST_OPTIONS_AGENT.pt`.
