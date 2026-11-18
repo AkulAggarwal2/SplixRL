@@ -196,6 +196,18 @@ This is the first agent trained with roughly what a player has on the real serve
 * **Evaluation** is fixed at 48×48, 6 opponents, 5% lag, and `best.pt` is chosen by evaluation return (real-score units).
 * `--init-from` can warm-start a stage from an earlier checkpoint with the same inputs.
 
+### Curriculum (current approach for the real-game agent)
+
+Training straight in the full setting (up to 10 opponents including hunters and stalkers) didn't work. Almost every early attempt ended in a quick death, and at 100k steps the agent still died within 50–220 steps without growing past its start square (`runs/realgame_hard_from_scratch`). So training goes in stages instead, each starting from the last (`runs/curriculum/run.sh`):
+
+* **A** is the 20×20 duel agent (`runs/round0_reward2/dyna/seed1/best.pt`): beats LoopBot 94%, ChaserBot 76%.
+* **B:** 24–40 boards, 1–4 opponents (loop, chaser, greedy, invader, jittered), up to 5% lag, all observation options and pausing. Reward: v2 + kill 10 + rank bonus 10. 400k steps.
+* **C:** the full setting (24–72 boards, 2–10 opponents incl. hunters and stalkers, up to 10% lag, self-play league). 1M steps.
+
+`--init-from` matches inputs **by name** when they differ (`load_by_name`): conv input channels and `vec` features the old agent had keep their weights; new ones start at zero; the output grows for the pause action. The grown network computes exactly the old agent's Q-values on the inputs they share (`test_curriculum_warm_start_matches_inputs_by_name`).
+
+At step 0 of B, before any new training, the transferred agent peaks at 73–117 cells, lives 175–433 steps and gets 0.4–7.5 kills a game in the new setting.
+
 ### Speed
 
 On the full real-game setup (random 24–72 boards, up to 10 bots, all observation options), training went from ~27 to ~300–420 steps/s on an M4:

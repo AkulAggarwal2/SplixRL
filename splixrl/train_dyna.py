@@ -27,6 +27,7 @@ import torch
 from .agents.dyna import DynaAgent, DynaConfig, MultiBuffer, ReplayBuffer, pick_device
 from .env import SplixEnv
 from .evaluation import CsvLogger, TrainingEvaluator
+from .obs import ObsConfig
 from .opponents import DEFAULT_POOL, opponent_label
 from .rewards import RewardConfig
 
@@ -139,6 +140,64 @@ def load_extended(module: torch.nn.Module, state: dict, exact_only: bool = False
     return notes
 
 
+def load_by_name(q: torch.nn.Module, state: dict, old_obs, new_obs) -> list[str]:
+    """Warm-start a Q-network whose inputs changed (curriculum stages).
+
+    Input channels of the first conv layer and ``vec`` columns of the first
+    linear layer are matched by name; inputs the old network didn't have start
+    at zero weight, so the new network computes what the old one did on the
+    inputs they share. Other same-shape tensors are copied; a larger output
+    layer (e.g. a new pause action) keeps fresh rows for the new actions.
+    """
+    own = q.state_dict()
+    notes = []
+    old_ch, new_ch = list(old_obs.channels), list(new_obs.channels)
+    old_vec, new_vec = list(old_obs.vec_features), list(new_obs.vec_features)
+    conv0 = "conv.0.weight"
+    first_lin = "body.0.weight" if "body.0.weight" in own else "head.0.weight"
+    for name, new in own.items():
+        old = state.get(name)
+        if old is None:
+            notes.append(f"{name}: new")
+            continue
+        if name == conv0:
+            w = torch.zeros_like(new)
+            hits = 0
+            for j, ch in enumerate(new_ch):
+                if ch in old_ch:
+                    w[:, j] = old[:, old_ch.index(ch)]
+                    hits += 1
+            own[name] = w
+            notes.append(f"conv input: {hits}/{len(new_ch)} channels carried over")
+            continue
+        if name == first_lin and old.shape != new.shape:
+            n_conv = new.shape[1] - len(new_vec)
+            if old.shape[1] - len(old_vec) != n_conv:
+                notes.append(f"{name}: conv size changed, fresh")
+                continue
+            w = torch.zeros_like(new) if old.shape[0] == new.shape[0] else new.clone()
+            w[: old.shape[0], :n_conv] = old[:, :n_conv]
+            hits = 0
+            for j, f in enumerate(new_vec):
+                if f in old_vec:
+                    w[: old.shape[0], n_conv + j] = old[:, n_conv + old_vec.index(f)]
+                    hits += 1
+            own[name] = w
+            notes.append(f"vec input: {hits}/{len(new_vec)} features carried over")
+            continue
+        if old.shape == new.shape:
+            own[name] = old.clone()
+        elif old.dim() == new.dim() and all(o <= n for o, n in zip(old.shape, new.shape)):
+            grown = new.clone()
+            grown[tuple(slice(0, d) for d in old.shape)] = old
+            own[name] = grown
+            notes.append(f"{name}: {tuple(old.shape)} -> {tuple(new.shape)}")
+        else:
+            notes.append(f"{name}: fresh")
+    q.load_state_dict(own)
+    return notes
+
+
 def linear_eps(step: int, total: int, cfg: DynaConfig) -> float:
     frac = min(1.0, step / max(1, cfg.eps_fraction * total))
     return cfg.eps_start + frac * (cfg.eps_end - cfg.eps_start)
@@ -211,7 +270,11 @@ def train(args: argparse.Namespace) -> Path:
     agent = DynaAgent(env.obs_config, grid_shape, n_vec, cfg, device=pick_device(args.device), seed=args.seed)
     if args.init_from:  # curriculum: continue from an earlier stage's weights
         ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
-        notes = load_extended(agent.q, ck["q"])
+        old_obs = ObsConfig.from_dict(ck["obs_config"])
+        if old_obs != env.obs_config:  # different inputs: line them up by name
+            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config)
+        else:
+            notes = load_extended(agent.q, ck["q"])
         agent.q_target.load_state_dict(agent.q.state_dict())
         if "model" in ck:
             notes += load_extended(agent.model, ck["model"], exact_only=True)

@@ -675,3 +675,29 @@ def test_memory_notices_land_being_stolen():
     assert v["land_lost"] == pytest.approx(9 / 32)
     assert v["lost_forward"] > 0 and v["lost_right"] > 0  # ahead and to the right of me
     assert o["grid"][cfg.channels.index("map_my_land_lost")].sum() >= 1
+
+
+def test_curriculum_warm_start_matches_inputs_by_name():
+    """A basic 20x20 agent grown to the full observation set computes the same
+    Q-values for its old actions (new inputs start at zero weight)."""
+    from splixrl.train_dyna import load_by_name
+
+    basic = SplixEnv(size=20, opponents=["loop"])
+    rich = SplixEnv(size=20, opponents=["loop"], coarse_factor=3, visible_radius=25, threat_features=True, minimap=True,
+                    memory=100, enemy_heading=True, size_features=True, reclaim_features=True, escape_features=True,
+                    allow_pause=True)
+    old = DynaAgent(basic.obs_config, basic.observation_space["grid"].shape, basic.observation_space["vec"].shape[0])
+    new = DynaAgent(rich.obs_config, rich.observation_space["grid"].shape, rich.observation_space["vec"].shape[0],
+                    DynaConfig(n_actions=4))
+    notes = load_by_name(new.q, old.q.state_dict(), basic.obs_config, rich.obs_config)
+    assert any("6/" in n for n in notes) and any("11/" in n for n in notes)
+    basic.reset(seed=3)
+    rich.game = basic.game  # same board for both views
+    for _ in range(5):
+        o_old = build_obs(basic.game, 0, basic.obs_config)
+        o_new = build_obs(basic.game, 0, rich.obs_config)
+        with torch.no_grad():
+            q_old = old.q(*[torch.tensor(o_old[k])[None] for k in ("grid", "vec")])
+            q_new = new.q(*[torch.tensor(o_new[k])[None] for k in ("grid", "vec")])
+        assert torch.allclose(q_old, q_new[:, :3], atol=1e-5)
+        basic.step(0 if basic.game.is_safe(0, 0) else 1)
