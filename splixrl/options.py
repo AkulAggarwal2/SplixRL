@@ -138,6 +138,11 @@ MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many til
 BUDGET_SHARE = 0.8
 # Unseen enemies are assumed to be at least this many tiles inside the edge of my view (lag, and the server's view is not exactly square).
 UNSEEN_MARGIN = 5
+# Don't start a loop the budget can't fit (it would be turned back at once).
+NO_DOOMED_LOOPS = True
+MIN_LOOP = 4
+# Turn a loop's side leg toward my land so it lies along the edge.
+HUG_EDGE = True
 
 
 def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
@@ -389,6 +394,10 @@ class OptionRunner:
         out, side, turn = self.params
         p = game.players[pid]
         if at_home:  # leave on the side away from enemies (or toward the chosen direction)
+            if NO_DOOMED_LOOPS and self._budget(game, pid) < MIN_LOOP:
+                # the safety rule would turn me back after a step or two, leaving a
+                # 1-tile bump: stay in and decide again
+                return self._step_inside(game, pid)
             outside = (game.owner != pid) & (game.trail < 0)
             if self.face is not None:
                 dr, dc = int(DIRS[self.face, 0]), int(DIRS[self.face, 1])
@@ -411,12 +420,38 @@ class OptionRunner:
                 self.left -= 1
                 return self._checked(game, pid, STRAIGHT)
             self.phase, self.left = "side", side - 1
+            if HUG_EDGE:
+                turn = self._hugging_turn(game, pid, side, turn)
             return self._checked(game, pid, turn)
         if self.phase == "side":
             if self.left > 0:
                 self.left -= 1
                 return self._checked(game, pid, STRAIGHT)
         return self._go_home(game, pid)
+
+    def _budget(self, game, pid):
+        p = game.players[pid]
+        reach = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64))
+        return 99.0 if reach is None else BUDGET_SHARE * (reach - self.threshold)
+
+    def _hugging_turn(self, game, pid, side, turn):
+        """Turn the side leg toward my land, so the loop lies flush along the
+        edge instead of jutting out past a corner: of the two turns, the one
+        whose end is closer to home (the default on a tie)."""
+        p = game.players[pid]
+        own = np.argwhere(game.owner == pid)
+        if not len(own):
+            return turn
+        best, best_d = turn, None
+        for t in (turn, TURN_LEFT if turn == TURN_RIGHT else TURN_RIGHT):
+            h = (p.heading + (3 if t == TURN_LEFT else 1)) % 4
+            end = np.array(p.pos) + side * DIRS[h]
+            if not (0 <= end[0] < game.size and 0 <= end[1] < game.size) or not game.is_safe(pid, t):
+                continue
+            d = int(np.abs(own - end).sum(1).min())
+            if best_d is None or d < best_d:
+                best, best_d = t, d
+        return best
 
     def _fit_budget(self, game, pid, out, side):
         """Shrink a loop (keeping its shape) so it fits the time before an enemy could arrive."""

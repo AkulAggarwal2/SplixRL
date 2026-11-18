@@ -154,3 +154,13 @@ The guard is now on by default.
 **Race features** (`--race-features`): six more inputs giving the enemies' side of the race. For the visible enemy whose trail the agent could cut with the most time to spare: (its distance back to its land − my distance to its trail), its distance home, its trail length, my distance to its trail, and the direction to it. The agent already had its own side (trail length, distance home, escape margin).
 
 **Run E**: from run C with the current rules (idle guard on), race features, `human` instead of `stalker`, and bigger maps (32–96). Also fixed: a warm start whose inputs changed used to reset an options agent's learned option values; it now keeps them and only adds rows for new options.
+
+**Odd territory shapes.** Each loop on its own is nearly a rectangle (median capture fills ~0.9 of its bounding box). The territory as a whole looked strange for two reasons. First, many 1–2 tile captures: 47% of captures on the crowded map, mostly loops turned back by the safety rule a step after leaving, which left notches along the edge. Second, loops jutted out from wherever the agent left its land. Fixes: don't start a loop the safety budget can't fit (`NO_DOOMED_LOOPS`, needs room for ≥ 4 tiles), and turn the side leg toward the agent's own land so the loop lies along the edge (`HUG_EDGE`). Run C agent, crowded = 48 games on 48×48 with 6 opponents, sparse = 24 games on 96×96 with 4 opponents (bots incl. `human`):
+
+| | return crowded / sparse | survival crowded / sparse | trail-cut deaths | peak land sparse | 1–2 tile captures sparse | territory fill of bounding box sparse |
+|---|---|---|---|---|---|---|
+| neither | 129.7 / 280.0 | 44% / 71% | 18 | 1897 | 27% | 0.43 |
+| no doomed loops only | 108.9 / 283.6 | 38% / 50% | 18 | 2045 | 15% | 0.44 |
+| **both** | **133.1 / 305.7** | **56% / 67%** | **7** | **2252** | **15%** | **0.50** |
+
+The guard alone hurt: without hugging, the loops it does start jut out, so they take longer and get caught. Both are on. The territory still fills only half its bounding box; a plan that lays long strips along a whole side would be the next step, and needs training.
