@@ -707,6 +707,67 @@ def test_stalker_hunts_from_far_away():
     assert d1 < d0 - 5  # it headed for my trail from ~75 tiles away
 
 
+def _human_setup(st_pos):
+    env = SplixEnv(size=60, opponents=["human"], n_opponents=1)
+    env.reset(seed=2)
+    g = env.game
+    me, st = g.players
+    me.trail = [(10, c) for c in range(10, 20)]
+    for cell in me.trail:
+        g.trail[cell] = 0
+    st.pos = st_pos
+    return env, g, me, st, env.opponents[0]
+
+
+def test_human_bot_ignores_trails_off_its_screen():
+    env, g, me, st, bot = _human_setup((50, 50))  # 40 rows away: off its screen
+    bot.phase = "home"
+    assert bot.seen_for == 0
+    for _ in range(6):
+        bot.act(g, 1)
+    assert bot.seen_for == 0
+
+
+def test_human_bot_reacts_after_a_delay():
+    env, g, me, st, bot = _human_setup((25, 15))  # 15 tiles below my trail: on its screen
+    for _ in range(bot.reaction):
+        bot.act(g, 1)
+    assert bot.seen_for == bot.reaction  # has seen it, not chasing yet
+    d0 = abs(st.pos[0] - 10)
+    for _ in range(8):
+        g.step([0 if g.is_safe(0, 0) else 1, bot.act(g, 1)])
+        if not me.alive:
+            break
+    assert not me.alive or abs(st.pos[0] - 10) < d0 - 4
+
+
+def test_race_features_say_who_i_can_cut_off():
+    env = SplixEnv(size=40, opponents=["random_safe"], race_features=True)
+    env.reset(seed=1)
+    g, cfg = env.game, env.obs_config
+    me, en = g.players
+    g.owner.fill(EMPTY)
+    g.trail.fill(EMPTY)
+    g.owner[5:10, 5:10] = 0
+    g.owner[30:35, 30:35] = 1
+    me.pos, me.heading, me.trail = (8, 8), 0, []
+    en.trail = [(r, 20) for r in range(29, 17, -1)]  # 12 tiles out from its land
+    for cell in en.trail:
+        g.trail[cell] = 1
+    en.pos = (17, 20)
+    v = dict(zip(cfg.vec_features, build_obs(g, 0, cfg)["vec"]))
+    home = min(abs(17 - r) + abs(20 - c) for r in range(30, 35) for c in range(30, 35))
+    reach = min(abs(8 - r) + abs(8 - c) for r, c in en.trail)
+    assert v["race_enemy_home"] * 32 == pytest.approx(home)
+    assert v["race_my_reach"] * 32 == pytest.approx(reach)
+    assert v["race_margin"] * 32 == pytest.approx(home - reach)
+    assert v["race_enemy_trail"] * 32 == pytest.approx(12)
+    g.trail.fill(EMPTY)
+    en.trail = []
+    v = dict(zip(cfg.vec_features, build_obs(g, 0, cfg)["vec"]))
+    assert v["race_margin"] == -2.0  # nobody out on a trail
+
+
 def test_memory_notices_land_being_stolen():
     env = SplixEnv(size=40, opponents=["random_safe"], minimap=True, memory=40)
     env.reset(seed=3)

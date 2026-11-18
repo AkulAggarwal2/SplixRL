@@ -64,6 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--option-safety", type=float, default=6.0, help="abort a plan when the escape margin falls to this (6 tested best) ...")
     p.add_argument("--option-lag-slack", type=float, default=30.0, help="... plus this times the lag estimate")
     p.add_argument("--lag-feature", action="store_true", help="give the agent an estimate of the lag")
+    p.add_argument("--race-features", action="store_true", help="give the agent the enemies' side of the race: their way home vs my way to their trail")
     # env
     p.add_argument("--size", type=int, default=20)
     p.add_argument("--max-steps", type=int, default=500)
@@ -247,6 +248,7 @@ def train(args: argparse.Namespace) -> Path:
         allow_pause=args.allow_pause,
         memory=args.memory,
         lag_feature=args.lag_feature,
+        race_features=args.race_features,
         league_prob=args.league_prob,
         max_pause=args.max_pause,
         reward=reward.to_dict(),
@@ -288,7 +290,9 @@ def train(args: argparse.Namespace) -> Path:
         ck = torch.load(args.init_from, map_location="cpu", weights_only=False)
         old_obs = ObsConfig.from_dict(ck["obs_config"])
         if old_obs != env.obs_config:  # different inputs: line them up by name
-            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config, fresh_output=args.options)
+            # fresh option values only when a per-tile agent becomes an options agent
+            notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config,
+                                 fresh_output=args.options and ck.get("options") is None)
         elif args.options and ck.get("options") is None:  # same inputs, new kind of output
             notes = load_by_name(agent.q, ck["q"], old_obs, env.obs_config, fresh_output=True)
         else:

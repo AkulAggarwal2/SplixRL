@@ -139,3 +139,18 @@ With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunter
 | **view bound 5 tiles in, square loops** | **10** | **18%** | **40/90** | **21** | **447** | **119.7 / 158.4** |
 
 **Run D** (adds steal_edge, 17 options) vs run C, current rules, same 60 hard games: D's best checkpoint scores return 121.5 vs 110.9 at the same survival (33%) but more trail-cut deaths (24 vs 18). It isn't clearly better, so C stays `BEST_OPTIONS_AGENT.pt`.
+
+**Human-like hunter and the idle guard again.** New bot `human`: a ChaserBot that only sees trails on its own screen (25 tiles), starts chasing after a trail has been in sight for 4 steps, and chases up to 40 tiles away. With `human` in place of `stalker`, the idle guard (expand instead of waiting when nobody is in view) now helps, which supports the sim-to-real explanation above. Run C agent, current rules:
+
+| | return | peak land | survival | trail-cut deaths |
+|---|---|---|---|---|
+| sparse (96×96, 4 opponents, 30 games), guard off | 168.7 | 1281 | 40% | 5 |
+| sparse, guard on | **262.3** | **1853** | **53%** | 7 |
+| crowded (48×48, 6 opponents, 60 games), guard off | 118.9 | 454 | 42% | 20 |
+| crowded, guard on | 125.8 | 479 | 42% | 17 |
+
+The guard is now on by default.
+
+**Race features** (`--race-features`): six more inputs giving the enemies' side of the race. For the visible enemy whose trail the agent could cut with the most time to spare: (its distance back to its land − my distance to its trail), its distance home, its trail length, my distance to its trail, and the direction to it. The agent already had its own side (trail length, distance home, escape margin).
+
+**Run E**: from run C with the current rules (idle guard on), race features, `human` instead of `stalker`, and bigger maps (32–96). Also fixed: a warm start whose inputs changed used to reset an options agent's learned option values; it now keeps them and only adds rows for new options.

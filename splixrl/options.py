@@ -208,7 +208,7 @@ class OptionRunner:
         self.aborted = False  # the safety rule fired
         self.face: int | None = None  # world direction an adaptive loop heads out in
         self.defend = defend
-        self.idle_guard = False  # if on: never stand around on my land with nobody in view (hurt in simulation, see SUMMARY)
+        self.idle_guard = True  # never stand around on my land with nobody in view (helps against human-like bots, see SUMMARY)
         self.idled_off = False
         self.defended = 0  # steps spent on the defend reflex
 

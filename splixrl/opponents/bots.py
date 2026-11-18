@@ -202,22 +202,42 @@ class ChaserBot(LoopBot):
 
     name = "chaser"
 
-    def __init__(self, chase_radius: int = 10, chase_max_trail: int = 30, **kw):
+    def __init__(self, chase_radius: int = 10, chase_max_trail: int = 30,
+                 vision: int | None = None, reaction: int = 0, **kw):
+        """``vision``: only trails within this many tiles (square, like the
+        screen) are seen; None sees the whole board. ``reaction``: a trail
+        must have been in sight this many steps in a row before the chase starts."""
         super().__init__(**kw)
         self.chase_radius = chase_radius
         self.chase_max_trail = chase_max_trail
+        self.vision = vision
+        self.reaction = reaction
+        self.seen_for = 0
+
+    def reset(self, game: SplixGame, pid: int, rng: np.random.Generator) -> None:
+        super().reset(game, pid, rng)
+        self.seen_for = 0
 
     def act(self, game: SplixGame, pid: int) -> int:
         p = game.players[pid]
         enemy_trail = (game.trail >= 0) & (game.trail != pid)
+        if self.vision is not None and enemy_trail.any():
+            r, c, v = p.pos[0], p.pos[1], self.vision
+            sight = np.zeros_like(enemy_trail)
+            sight[max(0, r - v) : r + v + 1, max(0, c - v) : c + v + 1] = True
+            enemy_trail &= sight
         if enemy_trail.any() and len(p.trail) < self.chase_max_trail:
             cells = np.argwhere(enemy_trail)
-            if int(np.abs(cells - np.array(p.pos)).sum(1).min()) <= self.chase_radius:
+            in_range = int(np.abs(cells - np.array(p.pos)).sum(1).min()) <= self.chase_radius
+            self.seen_for = self.seen_for + 1 if in_range else 0
+            if in_range and self.seen_for > self.reaction:
                 a = bfs_first_action(game, pid, enemy_trail, game.trail == pid, self._order())
                 if a is not None and game.is_safe(pid, a):
                     if game.owner[p.pos] != pid:
                         self.phase = "return"  # after the chase, go home
                     return a
+        else:
+            self.seen_for = 0
         return super().act(game, pid)
 
 

@@ -96,6 +96,11 @@ THREAT_FEATURES = ("home_threat_dist", "enemy_trail_on_my_land", "enemy_trail_di
 SIZE_FEATURES = ("my_size", "enemy_size", "size_advantage")
 RECLAIM_FEATURES = ("cheap_land", "cheap_dist", "cheap_forward", "cheap_right")
 ESCAPE_FEATURES = ("escape_margin",)
+# The other side of the race: for the visible enemy whose trail I could cut
+# with the most time to spare, (its distance home - my distance to its
+# trail), its distance home, its trail length, my distance to its trail and
+# the direction to it. Positive margin: I get there before it is safe.
+RACE_FEATURES = ("race_margin", "race_enemy_home", "race_enemy_trail", "race_my_reach", "race_forward", "race_right")
 SIZE_LOG_NORM = 8.0  # log1p(cells) / 8: ~1 at 3000 cells
 HEADING_FEATURES = ("heading_up", "heading_right", "heading_down", "heading_left")
 GLOBAL_EXTRA_VEC = HEADING_FEATURES
@@ -122,6 +127,7 @@ class ObsConfig:
     pause_feature: bool = False
     memory: int = 0
     lag_feature: bool = False
+    race_features: bool = False
 
     def __post_init__(self):
         if self.mode not in ("local", "global"):
@@ -189,6 +195,8 @@ class ObsConfig:
             v += MEMORY_FEATURES
         if self.lag_feature:
             v += ("lag_estimate",)
+        if self.race_features:
+            v += RACE_FEATURES
         return v
 
     def grid_shape(self, board_size: int) -> tuple[int, int, int]:
@@ -336,7 +344,37 @@ def _vec_features(game: SplixGame, pid: int, own: np.ndarray, cfg: ObsConfig,
         # fraction of turns that land late: the env's setting in simulation,
         # the client's running estimate on a server (x10, so 0.1 -> 1)
         vals.append(10.0 * float(getattr(game, "lag_estimate", 0.0)))
+    if cfg.race_features:
+        vals += _race_features(game, pid, pos, p.heading, visible)
     return [max(-FAR, min(FAR, float(v))) for v in vals]
+
+
+def _race_features(game: SplixGame, pid: int, pos: np.ndarray, heading: int,
+                   visible: np.ndarray | None) -> list[float]:
+    best = None
+    for q in game.players:
+        if not q.alive or q.pid == pid:
+            continue
+        trail = game.trail == q.pid
+        if visible is not None:
+            trail &= visible
+        cells = np.argwhere(trail)
+        if not len(cells):
+            continue
+        land = game.owner == q.pid
+        if visible is not None:
+            land &= visible
+        land_cells = np.argwhere(land)
+        home = float(np.abs(land_cells - np.array(q.pos)).sum(1).min()) if len(land_cells) else FAR * DIST_NORM
+        d = np.abs(cells - pos).sum(1)
+        i = int(d.argmin())
+        margin = home - float(d[i])
+        if best is None or margin > best[0]:
+            f, r = egocentric(cells[i] - pos, heading)
+            best = (margin, home, len(cells), float(d[i]), f, r)
+    if best is None:
+        return [-FAR, FAR, 0.0, FAR, 0.0, 0.0]
+    return [v / DIST_NORM for v in best]
 
 
 CHEAP_LAND_RADIUS = 25  # only look for cheap land this close (the server's view range)

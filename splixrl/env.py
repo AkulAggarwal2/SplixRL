@@ -69,6 +69,7 @@ class SplixEnv(gym.Env):
         max_pause: int = 20,
         memory: int = 0,
         lag_feature: bool = False,
+        race_features: bool = False,
         league_prob: float = 0.15,
         size_range: tuple[int, int] | None = None,
         n_opponents_range: tuple[int, int] | None = None,
@@ -102,6 +103,7 @@ class SplixEnv(gym.Env):
             visible_radius=visible_radius, threat_features=threat_features, minimap=minimap,
             enemy_heading=enemy_heading, size_features=size_features, reclaim_features=reclaim_features,
             escape_features=escape_features, pause_feature=allow_pause, memory=memory, lag_feature=lag_feature,
+            race_features=race_features,
         )
         # Pausing (action 3), as the real server allows. max_pause caps how many
         # steps in a row the agent may stay paused (then it goes straight), so
@@ -148,6 +150,7 @@ class SplixEnv(gym.Env):
             allow_pause=self.allow_pause,
             memory=self.obs_config.memory,
             lag_feature=self.obs_config.lag_feature,
+            race_features=self.obs_config.race_features,
             max_pause=self.max_pause,
             reward=self.reward_config.to_dict(),
             lag_prob=self.lag_prob,
