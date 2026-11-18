@@ -28,6 +28,9 @@ class RewardConfig:
     # cost makes clean straight loops win unless turning or pausing buys safety.
     turn_cost: float = 0.0
     pause_cost: float = 0.0
+    # pausing is an ambush tool: with this > 0, the pause cost is only charged
+    # when no enemy head is within this many tiles (Manhattan)
+    pause_free_radius: int = 0
     # Potential-based shaping (Ng, Harada & Russell 1999). The potential is
     # shaping * capture_per_cell * trail_length: it pays a little for
     # extending a trail and takes it back when the loop closes or the agent

@@ -712,3 +712,17 @@ def test_turn_and_pause_costs():
     _, r_pause, *_ = env.step(PAUSE)
     _, r_straight, *_ = env.step(STRAIGHT)
     assert r_turn == pytest.approx(-0.5) and r_pause == pytest.approx(-0.25) and r_straight == pytest.approx(0.0)
+
+
+def test_pause_is_free_only_near_enemies():
+    from splixrl.game import PAUSE
+
+    env = SplixEnv(size=40, opponents=["random_safe"], allow_pause=True,
+                   reward={"pause_cost": 0.5, "pause_free_radius": 6, "capture_per_cell": 0.0, "death": 0.0, "kill": 0.0})
+    env.reset(seed=0)
+    me, opp = env.game.players
+    opp.pos = (me.pos[0] + 20 if me.pos[0] < 20 else me.pos[0] - 20, me.pos[1])
+    _, r_far, *_ = env.step(PAUSE)
+    opp.pos = (me.pos[0], me.pos[1] + 3 if me.pos[1] < 36 else me.pos[1] - 3)
+    _, r_near, *_ = env.step(PAUSE)
+    assert r_far == pytest.approx(-0.5) and r_near == pytest.approx(0.0)

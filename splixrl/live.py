@@ -760,7 +760,7 @@ def main(argv=None) -> None:
     ap.add_argument("--out", help="CSV with one row per life")
     ap.add_argument("--serve-client", action="store_true", help="serve the web client at http://127.0.0.1:8000")
     ap.add_argument("--show", action="store_true", help="open a window showing the game as the actor sees it")
-    ap.add_argument("--act-margin", type=float, default=0.1, help="tie-breaker for trained agents: prefer straight, pause only when clearly better (0 = plain argmax)")
+    ap.add_argument("--act-margin", type=float, default=0.0, help="tie-breaker for trained agents: prefer straight, pause only when clearly better (0 = plain argmax; >0 can cause long straight runs)")
     ap.add_argument("--web", action="store_true", help="open splix.io and let it draw the game while the actor steers")
     args = ap.parse_args(argv)
     if args.serve_client:

@@ -246,8 +246,14 @@ class SplixEnv(gym.Env):
         r += rc.step
         if action in (1, 2):  # TURN_LEFT / TURN_RIGHT actually taken
             r -= rc.turn_cost
-        elif action == PAUSE:
-            r -= rc.pause_cost
+        elif action == PAUSE and rc.pause_cost:
+            me = g.players[0]
+            near = rc.pause_free_radius > 0 and any(
+                q.alive and q.pid != 0 and abs(q.pos[0] - me.pos[0]) + abs(q.pos[1] - me.pos[1]) <= rc.pause_free_radius
+                for q in g.players
+            )
+            if not near:  # nobody close: pausing is just idling
+                r -= rc.pause_cost
 
         agent_dead = not g.players[0].alive
         opps_dead = all(not p.alive for p in g.players[1:])

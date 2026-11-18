@@ -24,7 +24,7 @@ def main(argv=None) -> None:
     ap.add_argument("--episodes", type=int, default=1)
     ap.add_argument("--fps", type=float, default=8.0)
     ap.add_argument("--gif", help="write a GIF instead of opening a window")
-    ap.add_argument("--act-margin", type=float, default=0.1, help="tie-breaker for trained agents (0 = plain argmax)")
+    ap.add_argument("--act-margin", type=float, default=0.0, help="tie-breaker for trained agents: prefer straight within this Q margin (0 = plain argmax; >0 can cause long straight runs)")
     ap.add_argument("--respawn", action="store_true", help="opponents come back after dying")
     ap.add_argument("--allow-pause", action="store_true")
     ap.add_argument("--cell", type=int, default=14, help="GIF pixels per cell")
