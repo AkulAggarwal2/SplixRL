@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--device", default="auto", help="auto = cuda, else mps (Apple GPU), else cpu")
     p.add_argument("--num-envs", type=int, default=1, help="games played at once in worker processes")
     p.add_argument("--options", action="store_true", help="learn over options (plans) instead of per-tile moves")
-    p.add_argument("--option-safety", type=float, default=2.0, help="abort a plan when the escape margin falls to this ...")
+    p.add_argument("--option-safety", type=float, default=6.0, help="abort a plan when the escape margin falls to this (6 tested best) ...")
     p.add_argument("--option-lag-slack", type=float, default=30.0, help="... plus this times the lag estimate")
     p.add_argument("--lag-feature", action="store_true", help="give the agent an estimate of the lag")
     # env

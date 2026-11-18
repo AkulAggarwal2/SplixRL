@@ -109,3 +109,14 @@ Even random option choices reached a mean peak of 317 cells on 40×40 with 3 bot
 With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunters and stalkers, 5% lag): the options agent at 15k decisions scores return 83.9, peak 306, 637 steps, 8.1 kills, 13% survival. That's 3.4× the per-tile agent's 25.0. Later checkpoints of the same run (135k, 150k) were within noise of it (76–79), with longer games and more kills.
 
 **Options run B** (defend reflex built in during training, learning rate 5e-5) beat the earlier best on the same 60 hard games: return 89.1 vs 74.4, game length 733 vs 575, kills 11.5 vs 7.4, survival 23% vs 15%, peak land 262 vs 286. Note the earlier best scored 83.9 on its first run of these 60 games, which shows how noisy a 60-game evaluation still is. B is now `runs/options/BEST_OPTIONS_AGENT.pt`, and run C adds the 2 adaptive options on top of it.
+
+**Safety cushion.** Against humans the agent was caught on long trips through enemy territory: the abort rule (escape margin ≤ 2 tiles) assumes the enemy only reacts once it's close. Sweep on the same 60 hard games (best options agent):
+
+| cushion | return | peak land | game length | survived | trail-cut deaths | vs hunter | vs stalker |
+|---|---|---|---|---|---|---|---|
+| 2 | 89.1 | 262 | 733 | 23% | 42/60 | 4.0 | 18.7 |
+| 4 | 100.9 | 358 | 900 | 18% | 33/60 | 32.6 | 84.1 |
+| **6** | **118.4** | **394** | **1119** | **33%** | **21/60** | **40.0** | **91.9** |
+| 9 | 101.9 | 384 | 1104 | 32% | 20/60 | 39.8 | 83.4 |
+
+6 tiles is now the default.

@@ -14,7 +14,10 @@ option's steps, and the bootstrap discount is gamma ** (option length).
 Every option shares one safety rule: while a trail is out, if the escape
 margin (nearest visible enemy's distance to my trail minus my distance home)
 falls to ``safety + lag_slack * lag``, abort and take the shortest safe way
-home. More lag means acting earlier, because a turn can land a tile late.
+home. The default cushion of 6 tiles was picked on 60 hard test games
+(48x48, 6 opponents incl. hunters/stalkers): return 89 at 2 tiles, 101 at 4,
+118 at 6, 102 at 9 -- humans and hunters head for your trail as soon as you
+leave, so the race has to be called early. More lag means acting earlier, because a turn can land a tile late.
 No option runs longer than MAX_OPTION_STEPS, and a loop always ends at home.
 
 Every option also shares a defend reflex: when an enemy trail lies on my own
@@ -123,7 +126,7 @@ class OptionRunner:
     action each step, or None once the option is over."""
 
     def __init__(self, option: int, rng: np.random.Generator, lag: float = 0.0, can_pause: bool = True,
-                 safety: float = 2.0, lag_slack: float = 30.0, defend: bool = True):
+                 safety: float = 6.0, lag_slack: float = 30.0, defend: bool = True):
         self.kind, *self.params = OPTIONS[option]
         self.option = option
         self.rng = rng
@@ -330,7 +333,7 @@ class OptionsEnv(gym.Wrapper):
     k steps it took, the discount to bootstrap with.
     """
 
-    def __init__(self, env, gamma: float = 0.995, safety: float = 2.0, lag_slack: float = 30.0):
+    def __init__(self, env, gamma: float = 0.995, safety: float = 6.0, lag_slack: float = 30.0):
         super().__init__(env)
         self.gamma = gamma
         self.safety = safety
@@ -378,7 +381,7 @@ class OptionsActor:
         self.name = name
         self.deterministic = deterministic
         cfg = agent.options or {}
-        self.safety = cfg.get("safety", 2.0)
+        self.safety = cfg.get("safety", 6.0)
         self.lag_slack = cfg.get("lag_slack", 30.0)
         self.run: OptionRunner | None = None
         self.rng = np.random.default_rng(0)
@@ -411,7 +414,7 @@ class OptionsActor:
         return a
 
 
-def make_options_env(gamma: float = 0.995, safety: float = 2.0, lag_slack: float = 30.0, **env_kwargs):
+def make_options_env(gamma: float = 0.995, safety: float = 6.0, lag_slack: float = 30.0, **env_kwargs):
     """Picklable factory for vector envs."""
     from .env import SplixEnv
 
