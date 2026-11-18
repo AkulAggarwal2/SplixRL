@@ -221,7 +221,7 @@ def train(args: argparse.Namespace) -> Path:
 
         cfg.n_actions = N_OPTIONS
         cfg.n_step = 1  # each transition is already a whole option
-        cfg.planning_updates = 0
+        cfg.smdp = True  # Dyna plans with an option model (see DynaConfig.smdp)
     reward = RewardConfig.preset(args.reward_preset)
     for k, v in vars(dataclass_from_args(RewardConfig, args, prefix="reward_")).items():
         if getattr(args, "reward_" + k) is not None:  # explicit flags win over the preset
@@ -302,7 +302,8 @@ def train(args: argparse.Namespace) -> Path:
                        gamma=cfg.gamma if args.options else None)
     if args.options:
         agent.options = {"safety": args.option_safety, "lag_slack": args.option_lag_slack}
-    imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1)
+    imagined = ReplayBuffer(cfg.model_buffer_size, grid_shape, n_vec, seed=args.seed + 1,
+                            gamma=cfg.gamma if args.options else None)
 
     train_log = CsvLogger(run / "train.csv", TRAIN_FIELDS)
     metric_log = CsvLogger(run / "metrics.csv", METRIC_FIELDS)
@@ -359,6 +360,8 @@ def train(args: argparse.Namespace) -> Path:
             nxt = final_obs[i] if done[i] else {"grid": nobs["grid"][i], "vec": nobs["vec"][i]}
             src = final_info if done[i] else info
             disc = float(src["option_disc"][i]) if args.options else None
+            if disc is not None:
+                agent.mean_disc = 0.999 * agent.mean_disc + 0.001 * disc
             real.bufs[i].add(obs["grid"][i], obs["vec"][i], int(actions[i]), float(r[i]),
                              nxt["grid"], nxt["vec"], float(term[i]), end=bool(done[i]), disc=disc)
             ep_ret[i] += r[i]

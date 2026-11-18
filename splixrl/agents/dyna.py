@@ -65,6 +65,10 @@ class DynaConfig:
     tau: float = 0.0  # > 0: soft target update every step (Polyak); 0: hard copy every target_update
     model_gate: float = 1.0  # plan only while the model's error on changed cells is below this
     n_actions: int = N_ACTIONS  # 4 when the env allows pausing
+    # options (SMDP) mode: the world model predicts the state after a whole plan
+    # (an option model), so no per-tile view alignment; imagined transitions are
+    # discounted by mean_disc, the running mean of gamma ** (plan length)
+    smdp: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -374,6 +378,7 @@ class DynaAgent(Agent):
         self.model = WorldModel(self.grid_shape, n_vec, c.model_hidden, c.n_actions).to(self.device)
         self.model_opt = torch.optim.Adam(self.model.parameters(), lr=c.model_lr)
         self.q_updates = 0
+        self.mean_disc = self.cfg.gamma ** 10  # updated from real plan lengths in SMDP mode
         self.skipped_updates = 0  # updates dropped because the gradient wasn't finite
         # Acting is one observation at a time, which is slow on a GPU (each call
         # waits for the device). Act with a CPU copy, refreshed every actor_sync updates.
@@ -465,7 +470,7 @@ class DynaAgent(Agent):
 
     def model_update(self, batch, with_metrics: bool = False) -> dict[str, float]:
         grid, vec, action, reward, ngrid, nvec, done = batch[:7]
-        logits, pvec, prew, pdone = self.model(align(grid, action, self.obs_config), vec, action)
+        logits, pvec, prew, pdone = self.model(self._align(grid, action), vec, action)
         alive = 1.0 - done  # the obs after a death says nothing useful; only learn "done" there
         grid_loss = (F.binary_cross_entropy_with_logits(logits, ngrid, reduction="none").mean((1, 2, 3)) * alive).sum() / alive.sum().clamp(min=1)
         vec_loss = (((pvec - nvec) ** 2).mean(1) * alive).sum() / alive.sum().clamp(min=1)
@@ -482,7 +487,7 @@ class DynaAgent(Agent):
             pred = (logits > 0).float()
             mask = alive[:, None, None, None].bool().expand_as(pred)
             err = (pred != ngrid)[mask].float().mean().item() if mask.any() else 0.0
-            changed = (ngrid != align(grid, action, self.obs_config)) & mask
+            changed = (ngrid != self._align(grid, action)) & mask
             changed_err = (pred != ngrid)[changed].float().mean().item() if changed.any() else 0.0
             done_acc = ((pdone > 0).float() == done).float().mean().item()
         return {
@@ -492,6 +497,9 @@ class DynaAgent(Agent):
             "model_reward_mse": float(rew_loss.item()),
             "model_done_acc": done_acc,
         }
+
+    def _align(self, grid, action):
+        return grid if self.cfg.smdp else align(grid, action, self.obs_config)
 
     @torch.no_grad()
     def imagine(self, real: ReplayBuffer, imagined: ReplayBuffer, epsilon: float) -> int:
@@ -505,7 +513,7 @@ class DynaAgent(Agent):
             action = self.q(grid, vec).argmax(1)
             explore = torch.as_tensor(self.rng.random(len(grid)) < epsilon, device=self.device)
             action = torch.where(explore, torch.randint(0, self.cfg.n_actions, action.shape, device=self.device), action)
-            logits, nvec, rew, done_logit = self.model(align(grid, action, self.obs_config), vec, action)
+            logits, nvec, rew, done_logit = self.model(self._align(grid, action), vec, action)
             probs = torch.sigmoid(logits)
             ngrid = torch.bernoulli(probs) if c.model_sample == "bernoulli" else (probs > 0.5).float()
             done = (torch.sigmoid(done_logit) > 0.5).float()
@@ -517,6 +525,7 @@ class DynaAgent(Agent):
                 ngrid.to(torch.uint8).cpu().numpy(),
                 nvec.cpu().numpy(),
                 done.cpu().numpy(),
+                disc=np.full(len(grid), self.mean_disc, np.float32) if self.cfg.smdp else None,
             )
             added += len(grid)
             keep = done == 0

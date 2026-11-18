@@ -248,6 +248,22 @@ How it works. Once per tile, `live.py` rebuilds a `SplixGame` snapshot from what
 
 That cut Dyna's wall deaths on the server from 4/10 lives to 1/10: mean tiles went from 83 to 101 and mean time alive from 30 s to 36.5 s, at 50–60k training steps against 4 bots. To make agents robust to the rest, train with `--lag-prob 0.05`, where turns sometimes land a tile late. The world model then has to learn that moves are uncertain too.
 
+## Experiment 2 (optional): the same algorithms over options
+
+The main comparison stays per-tile. Experiment 2 asks whether the action abstraction changes which algorithm wins. All three algorithms choose among the 16 plans in `splixrl/options.py`, run by the same scripted controllers. Those are 10 rectangular loops, home, reclaim, attack, ambush and 2 adaptive loops, plus a shared safety rule and defend reflex.
+
+* **Harder setting than experiment 1.** On 20×20 with one opponent, even an *untrained* options agent wins 100% against random_safe and loop, so win rates saturate. Use: 32×32, 3 opponents drawn from `random_safe loop chaser greedy invader`, respawn, 1500 steps, `--reward-preset v2`. Compare on **return and peak territory**, not win rate.
+* **Same budget in game steps.** One decision runs about 10 tiles, so 20k decisions ≈ 200k tiles. Report game steps on the x-axis.
+* **Dyna plans with an option model.** The world model predicts the state after a whole plan, and imagined transitions are discounted by the running mean of γ^(plan length). `--planning-updates 0` gives the no-planning ablation, as in experiment 1.
+
+```bash
+python -m splixrl.train_dyna --run-dir runs/exp2/dyna/seed0 --seed 0 --options --train-freq 1 --steps 20000 \
+    --size 32 --n-opponents 3 --opponents random_safe loop chaser greedy invader --respawn --max-steps 1500 \
+    --eval-opponents loop chaser greedy invader --eval-size 32 --eval-n-opponents 3 --reward-preset v2
+```
+
+For Double DQN and PPO, see the "Experiment 2" notes in `splixrl/agents/ddqn.py` / `ppo.py`. Use `make_options_env(gamma, **env_kwargs)` and bootstrap with `info["option_disc"]` (γ^k) instead of γ. Save `"options": {...}` in the checkpoint, and every tool then plays the agent plan by plan.
+
 ## Adding Double DQN / PPO
 
 See the docstrings in `splixrl/agents/ddqn.py` and `ppo.py`. In short:

@@ -16,6 +16,24 @@ What the rest of the project needs from this file:
 Observations are dicts: ``obs["grid"]`` float32 (6, 15, 15) and
 ``obs["vec"]`` float32 (11,). Actions: 0 straight, 1 left, 2 right.
 ``splixrl.agents.base.obs_to_torch`` batches observations for a network.
+
+Experiment 2 (optional, after the per-tile version works): the same algorithm
+over options -- 16 plans (rectangular loops, home, reclaim, attack, ambush,
+adaptive loops) carried out by scripted controllers (``splixrl/options.py``).
+
+* Env: ``splixrl.options.make_options_env(gamma=..., **env_kwargs)``, a normal
+  Gymnasium env with ``Discrete(N_OPTIONS)`` actions. One ``step`` runs a whole
+  plan and returns the discounted reward collected during it.
+* Plans take different numbers of tiles. ``info["option_disc"]`` is gamma ** k
+  for a k-tile plan: use it instead of gamma when bootstrapping
+  (target = r + option_disc * (1 - done) * Q(s', a')).
+  For PPO the same goes inside GAE: delta = r + option_disc * V(s') - V(s),
+  and the advantage recursion uses option_disc * lambda in place of gamma * lambda.
+* Observations at decision points are the same dicts as above (use the same
+  observation settings as the Dyna options run, see README "Experiment 2").
+* Save ``"options": {"safety": 2.0, "lag_slack": 30.0}`` in the checkpoint;
+  ``load_agent`` then marks the agent as an options agent and every tool plays
+  it plan by plan. ``act`` returns an option index in ``range(N_OPTIONS)``.
 """
 
 from __future__ import annotations
