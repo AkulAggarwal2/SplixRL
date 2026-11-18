@@ -105,3 +105,5 @@ Even random option choices reached a mean peak of 317 cells on 40×40 with 3 bot
 | invader | return 63.6, 2.8 kills, peak 225 | return 103.3, 9.3 kills, peak 308 |
 | greedy | return 76.9, 5.9 kills, peak 325 | return 111.9, 16.0 kills, peak 403 |
 | loop | return 85.4, 2.0 kills, peak 384 | return 103.1, 7.3 kills, peak 449 |
+
+With the defend reflex, the same 60 hard games (48×48, 6 opponents incl. hunters and stalkers, 5% lag): the options agent at 15k decisions scores return 83.9, peak 306, 637 steps, 8.1 kills, 13% survival. That's 3.4× the per-tile agent's 25.0. Later checkpoints of the same run (135k, 150k) were within noise of it (76–79), with longer games and more kills.
