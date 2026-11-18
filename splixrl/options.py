@@ -261,16 +261,51 @@ class OptionRunner:
             if self.phase != "home":
                 self.aborted = True
             return self._go_home(game, pid)
+        if self.defend:
+            invader = self._invasion(game, pid, at_home)
+            if invader is not None:
+                self.defended += 1
+                if not at_home:  # out on a plan: get home first, then cut it from my own land
+                    return self._go_home(game, pid)
+                a = bfs_first_action(game, pid, invader, (game.owner != pid) | (game.trail == pid), ORDER)
+                if a is not None and game.is_safe(pid, a):
+                    return a
         if self.phase == "home":
             return self._go_home(game, pid)
-        if self.defend and at_home:
-            a = self._defend(game, pid)
-            if a is not None:
-                self.defended += 1
-                return a
         return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
 
-    def _defend(self, game, pid):
+    def _invasion(self, game, pid, at_home):
+        """Enemy trail cells on my land worth going for, or None.
+
+        A trail across my land is either a free kill or a big land grab
+        against me. Go for it when it is close (DEFEND_RADIUS) or when I can
+        win the race: my way to it (home first, if I'm out) is shorter than
+        its owner's way back to their own land."""
+        own = game.owner == pid
+        invader = (game.trail != EMPTY) & (game.trail != pid) & own
+        if not invader.any():
+            return None
+        p = game.players[pid]
+        me = np.array(p.pos)
+        detour = 0
+        if not at_home:
+            cells = np.argwhere(own)
+            detour = int(np.abs(cells - me).sum(1).min()) if len(cells) else 99
+        worth = np.zeros_like(invader)
+        for q in game.players:
+            if not q.alive or q.pid == pid:
+                continue
+            theirs = invader & (game.trail == q.pid)
+            if not theirs.any():
+                continue
+            mine_d = detour + int(np.abs(np.argwhere(theirs) - me).sum(1).min())
+            their_land = np.argwhere(game.owner == q.pid)
+            home_d = int(np.abs(their_land - np.array(q.pos)).sum(1).min()) if len(their_land) else 99
+            if mine_d <= DEFEND_RADIUS or mine_d <= home_d + 2:
+                worth |= theirs
+        return worth if worth.any() else None
+
+    def _defend_old(self, game, pid):  # kept for reference; replaced by _invasion
         own = game.owner == pid
         invader = (game.trail != EMPTY) & (game.trail != pid) & own
         if not invader.any():
