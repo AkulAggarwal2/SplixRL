@@ -74,3 +74,13 @@ Continuing training past an early peak consistently made agents worse:
 * fine-tune B2 (turn/pause costs, learning rate 2.5e-4). It did fix the behavior: idle pausing 20% → 1–8% of steps, zigzag turns 43% → 20–33%. But mean return fell 25.8 → 9.6 and peak land 110 → 71 (80 games per checkpoint).
 
 Fine-tune B3 repeats B2 with learning rate 5e-5 and a 2.5× slower target network, to test whether a gentler learner adds behavior without erasing what it knows.
+
+**B3 result: a gentler learner fixes the erosion.** Same setup and costs as B2, but learning rate 5e-5 (was 2.5e-4), soft target τ 0.002 (was 0.005) and ε ≤ 0.08. 80 games per checkpoint, same seeds:
+
+| | return | peak land | game length | kills | idle pausing | zigzag turns |
+|---|---|---|---|---|---|---|
+| previous best (B at 350k) | 25.8 | 110 | 324 | 5.3 | 20% | 43% |
+| B2 at 250k (lr 2.5e-4) | 9.6 | 71 | 228 | 2.1 | 1% | 29% |
+| **B3 at 100k (lr 5e-5)** | **45.0** | **147** | **467** | **9.0** | **2%** | 38% |
+
+Every B3 checkpoint from 25k on beat the previous best. B3 at 100k is now `runs/curriculum/BEST_REALGAME_AGENT.pt` (the old one is `..._v1.pt`). Stage C is being redone with the same gentle settings (`runs/curriculum/C2`).
