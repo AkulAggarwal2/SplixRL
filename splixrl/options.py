@@ -40,6 +40,7 @@ OPTIONS: tuple[tuple, ...] = tuple(
     # adaptive plans (appended last, so older options agents can be grown into this set):
     ("open_loop",),  # head for the most open direction, loop sized to the free space there
     ("safe_loop",),  # same direction choice, loop sized to stay ahead of the nearest enemy
+    ("steal_edge",),  # bite a strip off the neighbouring enemy land (land just taken from me first)
 )
 N_OPTIONS = len(OPTIONS)
 OPTION_NAMES = tuple(
@@ -62,6 +63,37 @@ def _open_space(game: SplixGame, pid: int, h: int, reach: int = 18) -> float:
     for r, c in _enemy_heads(game, pid):
         if r0 <= r < r1 and c0 <= c < c1:
             score -= 60.0
+    return score
+
+
+def _recently_lost(game: SplixGame, pid: int) -> np.ndarray:
+    """My land that someone else owns now, from the observation memory (if any)."""
+    mem = (getattr(game, "obs_memory", None) or {}).get(pid)
+    if not mem or not mem.get("maps"):
+        return np.zeros_like(game.owner, dtype=bool)
+    old_own = mem["maps"][0][2]
+    if old_own.shape != game.owner.shape:
+        return np.zeros_like(game.owner, dtype=bool)
+    return old_own & (game.owner != pid) & (game.owner != EMPTY)
+
+
+def _enemy_edge(game: SplixGame, pid: int, h: int, lost: np.ndarray, reach: int = 8) -> float:
+    """How good direction h is for biting into enemy land: enemy-owned tiles
+    (land just taken from me counts triple) in a strip next to me, minus enemies."""
+    p = game.players[pid]
+    n = game.size
+    dr, dc = int(DIRS[h, 0]), int(DIRS[h, 1])
+    cr, cc = p.pos[0] + dr * (reach // 2 + 2), p.pos[1] + dc * (reach // 2 + 2)
+    half = reach // 2 + 2
+    r0, r1, c0, c1 = max(0, cr - half), min(n, cr + half + 1), max(0, cc - half), min(n, cc + half + 1)
+    if r0 >= r1 or c0 >= c1:
+        return -1e9
+    window = game.owner[r0:r1, c0:c1]
+    enemy = (window != EMPTY) & (window != pid)
+    score = float(enemy.sum()) + 2.0 * float((lost[r0:r1, c0:c1] & enemy).sum())
+    for r, c in _enemy_heads(game, pid):
+        if abs(r - cr) + abs(c - cc) <= reach + 4:
+            score -= 80.0
     return score
 
 
@@ -98,14 +130,40 @@ def _enemy_heads(game: SplixGame, pid: int) -> np.ndarray:
     return np.array(heads, dtype=np.int64).reshape(-1, 2)
 
 
-def escape_margin(game: SplixGame, pid: int) -> float:
-    """(nearest visible enemy head's distance to my trail or head) - (my distance home)."""
-    p = game.players[pid]
+MEMORY_TRUST = 30  # remembered enemies older than this many steps are ignored
+
+
+def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
+    """Fewest steps any enemy could need to touch ``exposed`` cells.
+
+    Visible heads count at their distance. Enemies seen recently but now out of
+    sight count too: last seen ``age`` steps ago at P, they could be ``age``
+    tiles closer by now (the observation memory, see obs.memory_planes).
+    """
+    best = None
     heads = _enemy_heads(game, pid)
-    if not len(heads):
-        return 99.0
+    if len(heads):
+        best = int(np.abs(exposed[:, None, :] - heads[None, :, :]).sum(2).min())
+    mem = (getattr(game, "obs_memory", None) or {}).get(pid)
+    if mem:
+        clock = int(getattr(game, "clock", game.t))
+        for pos, t in mem.get("seen", {}).values():
+            age = clock - t
+            if 0 < age <= MEMORY_TRUST:
+                d = int(np.abs(exposed - np.array(pos)).sum(1).min()) - age
+                d = max(0, d)
+                best = d if best is None else min(best, d)
+    return best
+
+
+def escape_margin(game: SplixGame, pid: int) -> float:
+    """(fewest steps an enemy -- visible, or seen recently -- needs to reach my
+    trail or head) - (my distance home)."""
+    p = game.players[pid]
     exposed = np.array([*p.trail, p.pos], dtype=np.int64).reshape(-1, 2)
-    reach = int(np.abs(exposed[:, None, :] - heads[None, :, :]).sum(2).min())
+    reach = _enemy_reach(game, pid, exposed)
+    if reach is None:
+        return 99.0
     own = game.owner == pid
     if own[p.pos]:
         home = 0
@@ -250,6 +308,20 @@ class OptionRunner:
 
     _opt_safe_loop = _opt_open_loop
 
+    def _opt_steal_edge(self, game, pid, at_home):
+        """A short, wide loop into the enemy land next to mine: in 3-4 tiles,
+        along the border, back. Prefers land that was just taken from me."""
+        lost = _recently_lost(game, pid)
+        scores = [_enemy_edge(game, pid, h, lost) for h in range(4)]
+        d = int(np.argmax(scores))
+        if scores[d] <= 3:  # no enemy land worth biting nearby: a small safe loop instead
+            self.kind = "safe_loop"
+            return self._opt_open_loop(game, pid, at_home)
+        left_h, right_h = (d + 3) % 4, (d + 1) % 4
+        turn = TURN_LEFT if _enemy_edge(game, pid, left_h, lost) >= _enemy_edge(game, pid, right_h, lost) else TURN_RIGHT
+        self.kind, self.params, self.face = "loop", [4, 7, turn], d
+        return self._opt_loop(game, pid, at_home)
+
     def _opt_loop(self, game, pid, at_home):
         out, side, turn = self.params
         p = game.players[pid]
@@ -289,7 +361,16 @@ class OptionRunner:
 
         p = game.players[pid]
         if self.phase is None:
-            cheap = cheap_land(game, game.owner == pid, p.pos)
+            from scipy.ndimage import binary_fill_holes
+
+            own = game.owner == pid
+            cheap = cheap_land(game, own, p.pos)
+            # enemy pockets enclosed by my land are cheap too: one short trip fills them
+            pockets = binary_fill_holes(own) & ~own & (game.owner != EMPTY)
+            r, c = p.pos
+            near = np.zeros_like(own)
+            near[max(0, r - VIEW) : r + VIEW + 1, max(0, c - VIEW) : c + VIEW + 1] = True
+            cheap = cheap | (pockets & near)
             if not cheap.any():  # nothing cheap nearby: a small loop instead
                 self.kind, self.params = "loop", [3, 3, TURN_LEFT]
                 return self._opt_loop(game, pid, at_home)
