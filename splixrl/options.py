@@ -27,17 +27,60 @@ from __future__ import annotations
 
 import numpy as np
 
-from .game import EMPTY, PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
+from .game import DIRS, EMPTY, PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
 from .opponents.base import bfs_first_action, safe_actions
 
 LOOP_SIZES = ((3, 3), (5, 4), (7, 5), (10, 6), (14, 8))  # (tiles out, tiles along)
 OPTIONS: tuple[tuple, ...] = tuple(
     ("loop", out, side, turn) for out, side in LOOP_SIZES for turn in (TURN_LEFT, TURN_RIGHT)
-) + (("home",), ("reclaim",), ("attack",), ("ambush",))
+) + (("home",), ("reclaim",), ("attack",), ("ambush",)) + (
+    # adaptive plans (appended last, so older options agents can be grown into this set):
+    ("open_loop",),  # head for the most open direction, loop sized to the free space there
+    ("safe_loop",),  # same direction choice, loop sized to stay ahead of the nearest enemy
+)
 N_OPTIONS = len(OPTIONS)
 OPTION_NAMES = tuple(
     f"loop {o[1]}x{o[2]} {'L' if o[3] == TURN_LEFT else 'R'}" if o[0] == "loop" else o[0] for o in OPTIONS
 )
+
+
+def _open_space(game: SplixGame, pid: int, h: int, reach: int = 18) -> float:
+    """How attractive direction h is: free tiles in a window ahead, minus enemies there."""
+    p = game.players[pid]
+    n = game.size
+    dr, dc = int(DIRS[h, 0]), int(DIRS[h, 1])
+    half = reach // 2
+    cr, cc = p.pos[0] + dr * (half + 2), p.pos[1] + dc * (half + 2)
+    r0, r1, c0, c1 = max(0, cr - half), min(n, cr + half + 1), max(0, cc - half), min(n, cc + half + 1)
+    if r0 >= r1 or c0 >= c1:
+        return -1e9
+    free = (game.owner[r0:r1, c0:c1] == EMPTY) & (game.trail[r0:r1, c0:c1] == EMPTY)
+    score = float(free.sum())
+    for r, c in _enemy_heads(game, pid):
+        if r0 <= r < r1 and c0 <= c < c1:
+            score -= 60.0
+    return score
+
+
+def _free_run(game: SplixGame, pid: int, h: int, limit: int = 20) -> int:
+    """Free tiles straight ahead in direction h, starting past my own land."""
+    p = game.players[pid]
+    r, c = p.pos
+    dr, dc = int(DIRS[h, 0]), int(DIRS[h, 1])
+    run, seen_free = 0, False
+    for _ in range(limit + 30):
+        r, c = r + dr, c + dc
+        if not (0 <= r < game.size and 0 <= c < game.size):
+            break
+        if game.owner[r, c] == pid and not seen_free:
+            continue  # still crossing my own land
+        if game.trail[r, c] != EMPTY or (game.owner[r, c] != EMPTY and game.owner[r, c] != pid):
+            break
+        seen_free = True
+        run += 1
+        if run >= limit:
+            break
+    return run
 
 MAX_OPTION_STEPS = 90
 DEFEND_RADIUS = 15  # cut an enemy trail lying on my land when it is this close
@@ -91,6 +134,7 @@ class OptionRunner:
         self.left_home = False
         self.done = False
         self.aborted = False  # the safety rule fired
+        self.face: int | None = None  # world direction an adaptive loop heads out in
         self.defend = defend
         self.defended = 0  # steps spent on the defend reflex
 
@@ -179,11 +223,47 @@ class OptionRunner:
         return a if a is not None and game.is_safe(pid, a) else None
 
     # -- the options -----------------------------------------------------------
+    def _plan_adaptive(self, game, pid):
+        p = game.players[pid]
+        scores = [_open_space(game, pid, h) for h in range(4)]
+        d = int(np.argmax(scores))
+        left_h, right_h = (d + 3) % 4, (d + 1) % 4
+        turn = TURN_LEFT if scores[left_h] >= scores[right_h] else TURN_RIGHT
+        run = _free_run(game, pid, d)
+        side_run = _free_run(game, pid, left_h if turn == TURN_LEFT else right_h)
+        if self.kind == "open_loop":
+            out = int(np.clip(0.6 * run, 3, 14))
+        else:  # safe_loop: stay ahead of the nearest enemy
+            heads = _enemy_heads(game, pid)
+            e = int(np.abs(heads - np.array(p.pos)).sum(1).min()) if len(heads) else 99
+            out = int(np.clip((e - 4) // 2, 2, 10))
+            out = min(out, max(2, int(0.6 * run)))
+        side = int(np.clip(min(0.8 * out, max(3, 0.6 * side_run)), 2, 10))
+        self.kind, self.params, self.face = "loop", [out, side, turn], d
+
+    def _opt_open_loop(self, game, pid, at_home):
+        self._plan_adaptive(game, pid)
+        return self._opt_loop(game, pid, at_home)
+
+    _opt_safe_loop = _opt_open_loop
+
     def _opt_loop(self, game, pid, at_home):
         out, side, turn = self.params
-        if at_home:  # leave on the side away from enemies
+        p = game.players[pid]
+        if at_home:  # leave on the side away from enemies (or toward the chosen direction)
             outside = (game.owner != pid) & (game.trail < 0)
+            if self.face is not None:
+                dr, dc = int(DIRS[self.face, 0]), int(DIRS[self.face, 1])
+                rr, cc = np.mgrid[0 : game.size, 0 : game.size]
+                ahead = (rr - p.pos[0]) * dr + (cc - p.pos[1]) * dc >= 1
+                a = self._route(game, pid, outside & ahead, np.zeros_like(outside))
+                if a is not None:
+                    return self._checked(game, pid, a)
             return self._checked(game, pid, self._route(game, pid, outside, np.zeros_like(outside)))
+        if self.phase is None and self.face is not None and p.heading != self.face:
+            diff = (self.face - p.heading) % 4  # turn to face the chosen direction first
+            if not p.trail or len(p.trail) <= 2:
+                return self._checked(game, pid, TURN_RIGHT if diff in (1, 2) else TURN_LEFT)
         if self.phase is None:  # first tile outside: plan the rectangle from here
             self.phase, self.left = "out", out - 1
         if self.phase == "out":
