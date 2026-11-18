@@ -22,16 +22,18 @@ Best checkpoint per seed, 50 games per opponent:
 | Dyna, v2, seed 1 | 0.98 | 0.94 | 0.76 |
 | Dyna, v2, seed 2 | 0.96 | 0.46 | 0.16 |
 
-## 2. Ablation: planning causes the late collapse (seed 0, reward v2)
+## 2. Ablation: planning makes Dyna's late collapse much worse (3 seeds each, reward v2)
 
-Figure: `plots/ablation_planning_win_rate.png`.
+Figure: `plots/ablation_planning_win_rate.png`. Win rate, mean ± std over 3 seeds:
 
-| | vs loop at 40k / 120k / 200k | vs chaser at 40k / 120k / 200k |
-|---|---|---|
-| Dyna, 3 imagined updates per real one | 0.85 / 0.40 / 0.35 | 0.70 / 0.00 / 0.00 |
-| same learner, planning off | 0.90 / 0.75 / 0.70 | 0.50 / 0.65 / 0.35 |
+| | 40k | 120k | 200k |
+|---|---|---|---|
+| Dyna (3 imagined updates per real one), vs loop | 0.65 ± 0.28 | 0.45 ± 0.39 | 0.48 ± 0.22 |
+| same learner, planning off, vs loop | 0.83 ± 0.05 | 0.87 ± 0.08 | 0.68 ± 0.10 |
+| Dyna, vs chaser | 0.58 ± 0.24 | 0.22 ± 0.31 | 0.05 ± 0.07 |
+| planning off, vs chaser | 0.45 ± 0.04 | 0.57 ± 0.19 | 0.22 ± 0.09 |
 
-Imagined transitions from an imperfect world model pull the Q-values off course over time. In the large-map setting the world model's error on changed cells stayed around 0.85, so gated planning never switched on. This is one seed per arm and needs more seeds before it's a firm claim.
+Without planning the learner is better and much more consistent across seeds; its spread is a third to a fifth of Dyna's. Planning-off also slips against the chaser late (0.57 → 0.22), so planning amplifies an instability that is already there rather than causing it alone. The likely mechanism is imagined transitions from an imperfect world model pulling the Q-values off course. In the large-map setting the model's error on changed cells stayed around 0.85, so gated planning never switched on.
 
 ## 3. Problems found and fixed (Misha's "find problems and fix them")
 
