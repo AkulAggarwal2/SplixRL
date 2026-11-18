@@ -212,9 +212,13 @@ def align(grid: torch.Tensor, action: torch.Tensor, cfg) -> torch.Tensor:
 # ---------------------------------------------------------------- buffers
 def to_torch(arrays, device) -> tuple[torch.Tensor, ...]:
     """numpy batch -> tensors on the device; actions (int64) stay integers.
-    One transfer per tensor: on a GPU each transfer has a fixed cost."""
+    One transfer per tensor: on a GPU each transfer has a fixed cost.
+
+    The copy is synchronous on purpose: the numpy arrays here are temporaries,
+    and an asynchronous copy (non_blocking=True) can read them after they are
+    freed. That turned a real run's weights into NaN within 20k steps."""
     return tuple(
-        torch.as_tensor(a, dtype=torch.int64 if a.dtype == np.int64 else torch.float32).to(device, non_blocking=True)
+        torch.as_tensor(a, dtype=torch.int64 if a.dtype == np.int64 else torch.float32).to(device)
         for a in arrays
     )
 
@@ -363,6 +367,7 @@ class DynaAgent(Agent):
         self.model = WorldModel(self.grid_shape, n_vec, c.model_hidden, c.n_actions).to(self.device)
         self.model_opt = torch.optim.Adam(self.model.parameters(), lr=c.model_lr)
         self.q_updates = 0
+        self.skipped_updates = 0  # updates dropped because the gradient wasn't finite
         # Acting is one observation at a time, which is slow on a GPU (each call
         # waits for the device). Act with a CPU copy, refreshed every actor_sync updates.
         if self.device.type == "cpu":
@@ -411,7 +416,11 @@ class DynaAgent(Agent):
         loss = F.smooth_l1_loss(q, target)
         self.q_opt.zero_grad(set_to_none=True)
         loss.backward()
-        nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.grad_clip)
+        norm = nn.utils.clip_grad_norm_(self.q.parameters(), self.cfg.grad_clip)
+        if not torch.isfinite(norm):  # never let one bad batch poison the weights
+            self.q_opt.zero_grad(set_to_none=True)
+            self.skipped_updates += 1
+            return loss.detach()
         self.q_opt.step()
         self.q_updates += 1
         if self.cfg.tau > 0:

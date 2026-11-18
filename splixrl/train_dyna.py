@@ -31,7 +31,7 @@ from .opponents import DEFAULT_POOL, opponent_label
 from .rewards import RewardConfig
 
 TRAIN_FIELDS = ("step", "episode", "return", "length", "territory_frac", "peak_territory", "total_captured", "kills", "outcome", "death_cause", "opponent", "epsilon")
-METRIC_FIELDS = ("step", "q_loss", "model_loss", "model_grid_err", "model_changed_err", "model_reward_mse", "model_done_acc", "imagined", "q_updates", "steps_per_sec")
+METRIC_FIELDS = ("step", "q_loss", "skipped_updates", "model_loss", "model_grid_err", "model_changed_err", "model_reward_mse", "model_done_acc", "imagined", "q_updates", "steps_per_sec")
 
 
 def add_dataclass_args(parser: argparse.ArgumentParser, cls, prefix: str = "") -> None:
@@ -308,7 +308,7 @@ def train(args: argparse.Namespace) -> Path:
         if crossed(prev, step, args.log_every):
             now = time.time()
             metric_log.log({"step": step, "q_loss": q_loss, **model_stats, "imagined": imagined.size,
-                            "q_updates": agent.q_updates, "steps_per_sec": (step - last_step) / (now - last_t)})
+                            "q_updates": agent.q_updates, "skipped_updates": agent.skipped_updates, "steps_per_sec": (step - last_step) / (now - last_t)})
             last_t, last_step = now, step
         if crossed(prev, step, args.eval_every) or step >= args.steps:
             run_eval(step)
