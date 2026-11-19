@@ -286,3 +286,25 @@ Deaths, traced (first 20 games, 6 deaths): 5 were trail cuts while heading home 
 * **Whole-territory compactness for strips** (`GLOBAL_FILL`; the territory looked jagged on the minimap next to the leaders' blocks): hard 90% / 6,622 (vs 90% / 6,480), normal 100% / 7,714 (vs 95% / 7,433). On. Corner starts also bridge gaps of up to 3 tiles to the land beside them (`CORNER_GAP`; a live screenshot showed it running a leg one tile beside its own land).
 * **Belief update** (`BELIEF_STALE`: when the tile count shows land missing, mark unseen land as unknown, near fresh minimap growth first): hard 80% / 6,143, normal 95% / 7,054. Worse: off.
 * **From the live log**: the fatal line was planned with the player "remembered 21 tiles away", who had just been coming towards it. `MEMORY_APPROACH`: a remembered enemy that was heading my way is assumed to keep coming at full speed (not half). `LINE_REACH_CHECK`: a dent or cut line is drawn only if no enemy, seen or remembered, could reach any tile of the line before it's crossed (checked again when it steps off). Together with `CLOSE_GUARD_ENEMY_LAND` and `FAILED_LINE_MEMORY`, over 60 games (hard ×2, normal): deaths 9 → 7, trail-cut deaths 8 → 4, land at the end 6,717 → 6,601 (−2%, within noise). On.
+
+## Simulation vs real games disagree (Nov 19)
+
+Every live session, from the Cursor terminal logs (disconnects excluded):
+
+| sessions | code | lives | average life | land at death |
+|---|---|---|---|---|
+| Nov 18, ~midnight | loops sized to budget, idle guard, early turns | 3 | 14.4 min | 6,897 |
+| Nov 19, 9:17 am – 12:59 pm | + strips, cuts, dent lines, corner starts | 6 | 10.5 min | 4,070 |
+| Nov 19, 2:03 pm onward | + client-view, whole-territory compactness, gap-bridging corners, approaching memory, line reach check, enemy-land guard, failed-line memory | 12 | 3.7 min | 1,722 |
+
+The same rule versions at real scale in simulation (300×300, 12 opponents, 20 games each, same seeds, all with the client's knowledge):
+
+| version | hard mix: survived / land at the end | normal mix |
+|---|---|---|
+| Nov 18 3:47 pm (the 6th-place real game) | 65% / 2,029 | 85% / 2,694 |
+| Nov 18 end of day | 75% / 4,952 | 85% / 5,248 |
+| Nov 19 9:36 am | 75% / 5,101 | 100% / 6,920 |
+| Nov 19 11:28 am | 90% / 6,151 | 95% / 7,375 |
+| now | 85% / 6,284 | 100% / 7,364 |
+
+The simulator rates each version at least as good as the one before. Real games got much worse in the afternoon, and the simulator's worst version is the one that reached 6th place against people. Either the bots miss how people play, or the afternoon servers were tougher, or both. Large changes (early turns, strips, the capture rule) show big gains in simulation; small rule tweaks now need real games to judge. The next real test runs the 12:59 pm behaviour (`--set GLOBAL_FILL=0 CORNER_GAP=0 MEMORY_APPROACH=0 LINE_REACH_CHECK=0 CLOSE_GUARD_ENEMY_LAND=0 FAILED_LINE_MEMORY=0`) against the afternoon numbers.
