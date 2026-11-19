@@ -214,3 +214,13 @@ New bot `cutter`: finds enemy land inside its own and cuts a straight line throu
 Re-measured under the real rule (same fixed games, run C, current rules): crowded return 153.8 (was 160.5 under the old rule), deaths 8 of 48 (was 6); sparse return 346.3 (was 336.4), deaths 3 of 24 (was 3). Within noise, so the rule ablations above still hold; they weren't re-run.
 
 **Enclaves** (agent's 5×5 spawn inside a cutter's 13×13 or 19×19 block, 400 steps): the agent survived 42 of 46 games and grew out of the enclosure in all of them, because its ordinary strips through the encloser's land are exactly the edge-taking that breaks an enclosure. The old "enclaves are hopeless" result was an artefact of the wrong rule. The break-out reflex adds nothing (land at the end 560 vs 607 and 694 vs 706 with it on vs off), so it's off.
+
+**Cutting enemy land enclosed by mine** (`CUT_REFLEX`, the agent's version of the cutter): from its own land, cut a straight line through an enemy patch inside its land, on the side away from the owner's head. Only when the owner needs more steps to reach the line than the agent needs to cross it (+1), and when the cut gains more land per step than the strip it would lay instead. Also `STRIP_SKIP_HOLES`: no strips into holes in its own land. Before this, strips kept nibbling at an enemy sitting inside its land, right next to the owner, so the safety budget kept them tiny and it stopped expanding outward. Scenario: agent's 30×30 block on 64×64 with an enemy patch inside it, the owner waiting in its patch, 300 steps, 10 games each:
+
+| land gained | 6×12 patch | 10×22 patch |
+|---|---|---|
+| before (strips nibble at the hole, no cutting) | 217 | 224 |
+| no strips into holes, no cutting | 486 | **624** |
+| **no strips into holes + cutting** | **600** | 599 |
+
+No deaths in any of these. Fixed games (no enclosed enemies there, so it rarely applies): crowded return 153.8 → 155.7, deaths 8 → 7; sparse unchanged. The owner here waits passively. A player who reacts would make cutting riskier; the race check is the guard, but it isn't tested against that.

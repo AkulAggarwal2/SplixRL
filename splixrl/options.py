@@ -177,7 +177,13 @@ ALARM_COOLDOWN = 60  # steps between patrols
 GROWTH_AGE = 30  # "approaching": other land that appeared within this many steps
 MAX_STRIP = 24
 MAX_DEPTH = 8
+STRIP_SKIP_HOLES = True  # no strips into holes in my land (enclosed enemy land is for the cut)
 STRIP_WALK_WEIGHT = 1.0  # how much a step walking over my land to the strip's start counts against it
+# Cut a line through enemy land enclosed by mine, away from its owner's head:
+# the server gives me every piece the owner isn't standing in. Only when the
+# owner can't reach the line before I'm across it.
+CUT_REFLEX = True
+CUT_SLACK = 1  # the owner must need more than (tiles left to cross + this) steps to reach my line
 BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
 
 
@@ -281,6 +287,7 @@ class OptionRunner:
         self.broke_out = False  # switched to breaking out of an enclosure
         self.base_threshold = self.threshold
         self.prey = None  # (key, trail cells) of an enemy whose race I'm winning
+        self.cutting = None  # (start, h, gain, line cells, owner key) of a cut through enemy land
         self.alarmed = False  # went to look for land being taken out of view
         self.target = None
         self.patrol_kind = None
@@ -385,6 +392,8 @@ class OptionRunner:
         if SAFE_ATTACK and self.kind == "attack":
             self.prey = self._race(game, pid)
         prey_key = self.prey[0] if self.prey is not None else None
+        if self.kind == "cut" and self.cutting is not None:
+            prey_key = self.cutting[4] if self._cut_race_ok(game, pid) else None
         if not at_home and (self.steps > MAX_OPTION_STEPS or
                             (p.trail and escape_margin(game, pid, prey_key) <= self.threshold)):
             if self.phase != "home":
@@ -409,6 +418,21 @@ class OptionRunner:
             if prey is not None and int(np.abs(np.argwhere(prey[1]) - np.array(p.pos)).sum(1).min()) <= KILL_REACH:
                 self.kind, self.prey, self.phase, self.steps = "attack", prey, None, 1
                 self.killer = True
+        if CUT_REFLEX and at_home and self.phase is None and self.kind not in ("attack", "cut", "break_out"):
+            plan = self._plan_cut(game, pid)
+            if plan is not None:
+                # worth it only if it beats the strip I'd lay instead, per step of the trip
+                start, h, gain, line, key = plan
+                walk = int(abs(start[0] - p.pos[0]) + abs(start[1] - p.pos[1]))
+                strip = self._plan_strip(game, pid) if STRIPS else None
+                strip_rate = 0.0
+                if strip is not None:
+                    sh, sS, st, sL, sd = strip
+                    strip_rate = sL * sd / (sL + 2 * sd + abs(sS[0] - p.pos[0]) + abs(sS[1] - p.pos[1]))
+                if gain / (len(line) + 1 + walk) >= strip_rate:
+                    self.kind, self.cutting = "cut", plan
+                else:
+                    self.cutting = None
         if BREAK_OUT and at_home and self.phase is None and self.kind != "break_out":
             enc = enclosure(game, pid)
             if enc is not None:
@@ -639,6 +663,13 @@ class OptionRunner:
             return None
         lc = np.argwhere(local) + np.array([r0, c0])
         area0 = len(lc)
+        inside = None
+        if STRIP_SKIP_HOLES:
+            # holes in my land (often an enemy sitting inside it): don't nibble at
+            # them with strips next to their owner; grow outward, and leave
+            # enclosed enemy land to the cut
+            from scipy.ndimage import binary_fill_holes
+            inside = binary_fill_holes(own) & ~own
         lo0, hi0 = lc.min(0), lc.max(0)
         rr, cc = np.mgrid[0:n, 0:n]
         window = np.zeros_like(own)
@@ -685,6 +716,8 @@ class OptionRunner:
                         d = k
                     if d < 2:
                         continue
+                    if inside is not None and inside[S[0] + dr, S[1] + dc]:
+                        continue  # this edge faces a hole in my land
                     far = (S[0] + d * dr + (L - 1) * pdir[0], S[1] + d * dc + (L - 1) * pdir[1])
                     lo1 = np.minimum(np.minimum(lo0, S), far)
                     hi1 = np.maximum(np.maximum(hi0, S), far)
@@ -809,6 +842,66 @@ class OptionRunner:
         if a is None or not game.is_safe(pid, a):
             return self._step_inside(game, pid)
         return a
+
+    def _plan_cut(self, game, pid):
+        from .opponents.bots import plan_cut
+
+        def winnable(line, q):  # the owner needs longer to reach the line than I need to cross it
+            d = int(np.abs(np.array(line) - np.array(q.pos)).sum(1).min())
+            return d > len(line) + 1 + CUT_SLACK
+
+        plan = plan_cut(game, pid, reach=VIEW, ok=winnable)
+        if plan is None:
+            return None
+        start, h, gain, line, owner_pid = plan
+        q = game.players[owner_pid]
+        self.cutting = (start, h, gain, line, getattr(q, "key", q.pid))
+        if not self._cut_race_ok(game, pid, at_start=True):
+            self.cutting = None
+            return None
+        return self.cutting
+
+    def _cut_race_ok(self, game, pid, at_start=False):
+        """Can the patch's owner reach my line before I'm across it?"""
+        start, h, gain, line, key = self.cutting
+        q = next((q for q in game.players if q.alive and getattr(q, "key", q.pid) == key), None)
+        if q is None:
+            return True
+        p = game.players[pid]
+        cells = np.array(line if at_start else [*p.trail, p.pos, *line[len(p.trail):]], dtype=np.int64).reshape(-1, 2)
+        # the race starts when I step off my land (the walk to the start is on it,
+        # and this is re-checked every step of the walk)
+        left = len(line) + 1 - (0 if at_start else len(p.trail))
+        d = int(np.abs(cells - np.array(q.pos)).sum(1).min())
+        return d > left + CUT_SLACK
+
+    def _opt_cut(self, game, pid, at_home):
+        start, h, gain, line, key = self.cutting
+        p = game.players[pid]
+        if at_home:
+            if self.phase not in (None, "to_start"):
+                return self._go_home(game, pid)
+            if not self._cut_race_ok(game, pid, at_start=True) or self.steps > 30:
+                return self._step_inside(game, pid)  # the owner came close: not now
+            self.phase = "to_start"
+            T = (start[0] + int(DIRS[h, 0]), start[1] + int(DIRS[h, 1]))
+            goal = np.zeros_like(game.owner, dtype=bool)
+            goal[T] = True
+            blocked = game.owner != pid
+            for side in ((h + 1) % 4, (h + 3) % 4):  # step out from the start cell itself, facing across
+                x, y = T[0] + int(DIRS[side, 0]), T[1] + int(DIRS[side, 1])
+                if 0 <= x < game.size and 0 <= y < game.size:
+                    blocked[x, y] = True
+            blocked[T] = False
+            blocked |= game.trail == pid
+            a = bfs_first_action(game, pid, goal, blocked, ORDER)
+            if a is None:
+                return self._step_inside(game, pid)
+            return self._checked(game, pid, a)
+        self.phase = "across"
+        if p.heading == h and game.is_safe(pid, STRAIGHT):
+            return STRAIGHT
+        return self._go_home(game, pid)
 
     def _opt_home(self, game, pid, at_home):
         return self._step_inside(game, pid) if at_home else self._go_home(game, pid)

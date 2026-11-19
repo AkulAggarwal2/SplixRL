@@ -285,6 +285,55 @@ class InvaderBot(LoopBot):
         return super().act(game, pid)
 
 
+def plan_cut(game: SplixGame, pid: int, reach: int = 30, min_gain: int = 4, ok=None):
+    """Best straight cut through enemy land enclosed by mine, as
+    (start cell on my land, direction, cells cut off, line cells, owner pid), or None.
+    The line runs from my land to my land, at least 2 rows/columns from the
+    owner's head; what it cuts off is the patch on the far side from the head.
+    ``ok(line cells, owner)`` can veto lines (e.g. ones the owner could reach first)."""
+    from scipy.ndimage import binary_fill_holes
+
+    own = game.owner == pid
+    if not own.any():
+        return None
+    closed = binary_fill_holes(own)
+    me = np.array(game.players[pid].pos)
+    best, best_score = None, min_gain - 1
+    for q in game.players:
+        if not q.alive or q.pid == pid:
+            continue
+        patch = closed & (game.owner == q.pid)
+        if not patch.any():
+            continue
+        hr, hc = q.pos
+        cells = np.argwhere(patch)
+        for axis in (0, 1):  # 0: a horizontal line (fixed row), 1: vertical (fixed column)
+            for line in np.unique(cells[:, axis]):
+                if abs(int(line) - (hr if axis == 0 else hc)) <= 1:
+                    continue  # too close to its head
+                span = cells[cells[:, axis] == line][:, 1 - axis]
+                a, b = int(span.min()), int(span.max())
+                path = [(int(line), k) if axis == 0 else (k, int(line)) for k in range(a, b + 1)]
+                ends = [(int(line), a - 1), (int(line), b + 1)] if axis == 0 else [(a - 1, int(line)), (b + 1, int(line))]
+                n = game.size
+                if not all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in ends):
+                    continue
+                if any(own[x, y] or (x, y) == (hr, hc) for x, y in path):
+                    continue
+                # what the line cuts off: patch cells on the far side from the head
+                side = cells[:, axis] - int(line)
+                head_side = (hr if axis == 0 else hc) - int(line)
+                score = int(np.count_nonzero(np.sign(side) == -np.sign(head_side)))
+                start = min(ends, key=lambda e: abs(e[0] - me[0]) + abs(e[1] - me[1]))
+                if abs(start[0] - me[0]) + abs(start[1] - me[1]) > reach:
+                    continue
+                other = ends[1] if start == ends[0] else ends[0]
+                h = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1]))) == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
+                if score > best_score and (ok is None or ok(path, q)):
+                    best, best_score = (start, h, score, path, q.pid), score
+    return best
+
+
 class CutterBot(LoopBot):
     """Cuts enemy land that sits inside or against its own: drives a straight
     line across the enemy patch, from its land to its land, on the side away
@@ -304,47 +353,8 @@ class CutterBot(LoopBot):
         self.cut = None  # (start cell on my land, direction across)
 
     def _plan(self, game: SplixGame, pid: int):
-        from scipy.ndimage import binary_fill_holes
-
-        own = game.owner == pid
-        if not own.any():
-            return None
-        closed = binary_fill_holes(own)
-        me = np.array(game.players[pid].pos)
-        best, best_score = None, 3
-        for q in game.players:
-            if not q.alive or q.pid == pid:
-                continue
-            patch = closed & (game.owner == q.pid)
-            if not patch.any():
-                continue
-            hr, hc = q.pos
-            cells = np.argwhere(patch)
-            for axis in (0, 1):  # 0: a horizontal line (fixed row), 1: vertical (fixed column)
-                for line in np.unique(cells[:, axis]):
-                    if abs(int(line) - (hr if axis == 0 else hc)) <= 1:
-                        continue  # too close to its head
-                    span = cells[cells[:, axis] == line][:, 1 - axis]
-                    a, b = int(span.min()), int(span.max())
-                    path = [(int(line), k) if axis == 0 else (k, int(line)) for k in range(a, b + 1)]
-                    ends = [(int(line), a - 1), (int(line), b + 1)] if axis == 0 else [(a - 1, int(line)), (b + 1, int(line))]
-                    n = game.size
-                    if not all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in ends):
-                        continue
-                    if any(own[x, y] or (x, y) == (hr, hc) for x, y in path):
-                        continue
-                    # what the line cuts off: patch cells on the far side from the head
-                    side = cells[:, axis] - int(line)
-                    head_side = (hr if axis == 0 else hc) - int(line)
-                    score = int(np.count_nonzero(np.sign(side) == -np.sign(head_side)))
-                    start = min(ends, key=lambda e: abs(e[0] - me[0]) + abs(e[1] - me[1]))
-                    if abs(start[0] - me[0]) + abs(start[1] - me[1]) > self.reach:
-                        continue
-                    other = ends[1] if start == ends[0] else ends[0]
-                    h = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1]))) == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
-                    if score > best_score:
-                        best, best_score = (start, h), score
-        return best
+        plan = plan_cut(game, pid, self.reach)
+        return None if plan is None else plan[:2]
 
     def act(self, game: SplixGame, pid: int) -> int:
         p = game.players[pid]
