@@ -172,14 +172,17 @@ VIEW_DEFEND = True
 # being taken where I can't see: walk over my land to where it likely is --
 # border other land has grown toward lately (minimap), else border other land
 # touches, else my land out of view. At most one patrol per ALARM_COOLDOWN steps.
-LAND_ALARM = True
+LAND_ALARM = False  # off: walking to a far border arrives after the raid (see SUMMARY)
 ALARM_TILES = 5   # tiles lost within ALARM_WINDOW steps
 ALARM_WINDOW = 20
 ALARM_COOLDOWN = 60  # steps between patrols
+PATROL_STEPS = 80  # a patrol keeps going this long to reach the threatened border (big territories)
 GROWTH_AGE = 30  # "approaching": other land that appeared within this many steps
 MAX_STRIP = 24
 MAX_DEPTH = 8
 STRIP_SKIP_HOLES = True  # no strips into holes in my land (enclosed enemy land is for the cut)
+STRIP_WINDOW = 25  # strips may start this far away (50 tested: no better, more deaths)
+STRIP_MAX_WALK = 50
 STRIP_WALK_WEIGHT = 1.0  # how much a step walking over my land to the strip's start counts against it
 # Cut a line through enemy land enclosed by mine, away from its owner's head:
 # the server gives me every piece the owner isn't standing in. Only when the
@@ -696,8 +699,9 @@ class OptionRunner:
             return None
         d_cap = int(np.clip(budget // 2, 2, MAX_DEPTH))
         me = np.array(p.pos)
-        r0, r1 = max(0, me[0] - VIEW), min(n, me[0] + VIEW + 1)
-        c0, c1 = max(0, me[1] - VIEW), min(n, me[1] + VIEW + 1)
+        R = max(VIEW, STRIP_WINDOW)  # edges this far away count too (walking there is on my land)
+        r0, r1 = max(0, me[0] - R), min(n, me[0] + R + 1)
+        c0, c1 = max(0, me[1] - R), min(n, me[1] + R + 1)
         local = own[r0:r1, c0:c1]
         if not local.any():
             return None
@@ -768,6 +772,8 @@ class OptionRunner:
                         continue
                     fill = (area0 + gained) / float(np.prod(hi1 - lo1 + 1))
                     walk = int(np.abs(np.array(S) - me).sum())
+                    if walk > STRIP_MAX_WALK:
+                        continue
                     score = gained / (L + 2 * d + STRIP_WALK_WEIGHT * walk) * fill * fill
                     if score > best_score:
                         ph = [i for i in range(4) if (int(DIRS[i, 0]), int(DIRS[i, 1])) == pdir][0]
@@ -792,8 +798,10 @@ class OptionRunner:
                     blocked[x, y] = True
             blocked[T] = False
             blocked |= game.trail == pid
+            if tuple(p.pos) == tuple(S) and self._budget(game, pid) < max(MIN_LOOP, d + 2):
+                return self._step_inside(game, pid)  # at the start, but it's no longer safe here: decide again
             a = bfs_first_action(game, pid, goal, blocked, ORDER)
-            if a is None or self.steps > 45:  # can't get there: an ordinary loop instead
+            if a is None or self.steps > STRIP_MAX_WALK + 5:  # can't get there: an ordinary loop instead
                 self.kind = "open_loop"
                 return self._opt_open_loop(game, pid, at_home)
             return self._checked(game, pid, a)
@@ -862,7 +870,7 @@ class OptionRunner:
         from scipy.ndimage import binary_dilation
 
         p = game.players[pid]
-        if not at_home or self.steps > 30:
+        if not at_home or self.steps > PATROL_STEPS:
             return self._go_home(game, pid) if not at_home else self._step_inside(game, pid)
         own = game.owner == pid
         r, c = p.pos

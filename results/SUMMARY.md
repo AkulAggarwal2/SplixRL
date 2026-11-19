@@ -239,3 +239,13 @@ No deaths in any of these. Fixed games (no enclosed enemies there, so it rarely 
 | **lines up to 1 budget** | 634 | **157.9** / 8 | **358.2 / 1** | **335.9 / 2** |
 
 The 2-budget version takes more land but dies more (17 vs 12 of 90 deaths, first version). With one budget it's about as safe as before (11 vs 12 of 90) and gets 4–10% more return, so that's on.
+
+**Defending far land, and walking to bigger room: neither helped.** Scenario: an 80×80 territory on 128×128, the agent in one corner, two invaders raiding the opposite corner about 70 tiles away, 400 steps, 12 games:
+
+| | most land lost | land at the end | kills | deaths |
+|---|---|---|---|---|
+| **no land alarm** | **50** | **6910** | 18 | 0 |
+| alarm, patrol up to 30 steps | 61 | 6786 | 17 | 0 |
+| alarm, patrol up to 80 steps | 102 | 6681 | 22 | 0 |
+
+A raid takes a few dozen steps, and walking 70 tiles to it arrives after it's over, while giving up expansion, so the alarm is off. Strips starting up to 50 tiles away instead of 25 (judged from remembered land, walk counted against them): fixed-game return 826 vs 830 summed over the three maps, deaths 11 vs 9 of 90, so the window stays 25. Kept: the safety budget is checked again at a strip's start before stepping out. The invaders here raid quickly; people who take long, slow bites out of a big territory might be worth walking to, but that isn't tested.
