@@ -138,6 +138,7 @@ MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many til
 # instead of being aborted halfway, which captured almost nothing.
 BUDGET_SHARE = 0.8
 IDLE_BUDGET = 12  # expand instead of waiting at home when a strip this big fits (None: only with nobody on screen)
+UNSEEN_REACH = None  # with no enemy known, assume one this many tiles away (None: no limit)
 LAG_CAP = 0.1  # the most lag the safety cushion accounts for (training and tests used 0 - 0.1)
 # Unseen enemies are assumed to be at least this many tiles inside the edge of my view (lag, and the server's view is not exactly square).
 UNSEEN_MARGIN = 5
@@ -637,7 +638,11 @@ class OptionRunner:
     def _budget(self, game, pid):
         p = game.players[pid]
         reach = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64))
-        return 99.0 if reach is None else BUDGET_SHARE * (reach - self.threshold)
+        if reach is None:
+            if UNSEEN_REACH is None:
+                return 99.0
+            reach = UNSEEN_REACH  # nobody known -- but someone could be just off screen
+        return BUDGET_SHARE * (reach - self.threshold)
 
     def _hugging_turn(self, game, pid, side, turn):
         """Turn the side leg toward my land, so the loop lies flush along the
@@ -1053,7 +1058,9 @@ class OptionRunner:
                 return self._step_inside(game, pid)
             return self._checked(game, pid, a)
         self.phase = "across"
-        if p.heading == h and game.is_safe(pid, STRAIGHT):
+        # straight on until back on my land -- but no further than the planned line:
+        # if the far end isn't mine any more, turn for home
+        if p.heading == h and game.is_safe(pid, STRAIGHT) and len(p.trail) <= len(line):
             return STRAIGHT
         return self._go_home(game, pid)
 

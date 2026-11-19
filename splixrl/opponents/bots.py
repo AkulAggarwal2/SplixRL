@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..game import DIRS, N_ACTIONS, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
+from ..game import DIRS, N_ACTIONS, PAUSE, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
 from .base import Opponent, bfs_first_action, safe_actions
 
 
@@ -385,3 +385,71 @@ class CutterBot(LoopBot):
         elif self.cut is not None and not p.trail:
             self.cut = None
         return super().act(game, pid)
+
+
+
+class ProwlerBot(ChaserBot):
+    """Hunts the way strong players do on a big map: from home it often heads
+    for the biggest territory on the map (players know where land is from the
+    minimap), waits paused near its edge, and pounces on any trail that shows
+    up on its screen (it sees 25 tiles and reacts after a few steps, like the
+    human-like bot). Then it goes home and picks again. Travelling and waiting
+    leave its own trail out, so it can be killed too."""
+
+    name = "prowler"
+
+    def __init__(self, prowl_prob: float = 0.5, lurk_steps: int = 40, max_trip: int = 90, **kw):
+        kw = {"chase_radius": 40, "chase_max_trail": 120, "vision": 25, "reaction": 3, **kw}
+        super().__init__(**kw)
+        self.prowl_prob = prowl_prob
+        self.lurk_steps = lurk_steps
+        self.max_trip = max_trip
+
+    def reset(self, game: SplixGame, pid: int, rng: np.random.Generator) -> None:
+        super().reset(game, pid, rng)
+        self.target = None  # cells to lurk next to
+        self.lurk_left = 0
+
+    def _pick_target(self, game: SplixGame, pid: int):
+        sizes = [(int(np.count_nonzero(game.owner == q.pid)), q.pid) for q in game.players
+                 if q.alive and q.pid != pid]
+        sizes = [x for x in sizes if x[0] > 0]
+        if not sizes:
+            return None
+        _, victim = max(sizes)
+        land = game.owner == victim
+        # the ring 3 tiles outside its land, nearest part to me
+        from scipy.ndimage import binary_dilation
+
+        ring = binary_dilation(land, iterations=3) & ~binary_dilation(land, iterations=2) & (game.owner != pid)
+        return ring if ring.any() else None
+
+    def act(self, game: SplixGame, pid: int) -> int:
+        p = game.players[pid]
+        own = game.owner == pid
+        # chasing a visible trail beats everything (ChaserBot's rule, with vision and reaction)
+        enemy_trail = (game.trail >= 0) & (game.trail != pid)
+        r, c, v = p.pos[0], p.pos[1], self.vision
+        sight = np.zeros_like(enemy_trail)
+        sight[max(0, r - v) : r + v + 1, max(0, c - v) : c + v + 1] = True
+        if (enemy_trail & sight).any() and len(p.trail) < self.chase_max_trail:
+            a = super().act(game, pid)
+            if self.seen_for > self.reaction:
+                return a
+        if own[p.pos] and not p.trail:
+            if self.target is None and self.rng.random() < self.prowl_prob / 20:
+                self.target, self.lurk_left = self._pick_target(game, pid), self.lurk_steps
+            if self.target is None:
+                return LoopBot.act(self, game, pid)
+        if self.target is not None:
+            if len(p.trail) > self.max_trip or self.lurk_left <= 0:
+                self.target = None
+                return self.go_home(game, pid)
+            if self.target[p.pos] or int(np.abs(np.argwhere(self.target) - np.array(p.pos)).sum(1).min()) <= 1:
+                self.lurk_left -= 1
+                return PAUSE if game.is_safe(pid, PAUSE) else STRAIGHT
+            a = bfs_first_action(game, pid, self.target, game.trail == pid, self._order())
+            if a is not None and game.is_safe(pid, a):
+                return a
+            self.target = None
+        return LoopBot.act(self, game, pid)

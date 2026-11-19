@@ -926,7 +926,14 @@ def main(argv=None) -> None:
     ap.add_argument("--act-margin", type=float, default=0.0, help="tie-breaker for trained agents: prefer straight, pause only when clearly better (0 = plain argmax; >0 can cause long straight runs)")
     ap.add_argument("--web", action="store_true", help="open splix.io and let it draw the game while the actor steers")
     ap.add_argument("--explain", action="store_true", help="options agents: print one line per plan (what, how big, why)")
+    ap.add_argument("--set", nargs="*", default=[], metavar="NAME=value",
+                    help="options agents: change a setting in splixrl.options, e.g. --set SAFE_STRIPS=1 (more cautious strips)")
     args = ap.parse_args(argv)
+    if args.set:
+        from .benchmark import _apply
+
+        _apply(args.set)
+        print("settings:", " ".join(args.set), flush=True)
     if args.serve_client:
         serve_client(8000)
         print(f"watch: http://127.0.0.1:8000/#ip={args.server}", flush=True)

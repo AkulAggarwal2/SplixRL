@@ -9,6 +9,8 @@ A spec is a string (or an Opponent factory). String forms:
     "greedy"            LoopBot drawing big loops and ignoring danger until late:
                         lots of land, and long trails to cut (kill practice)
     "invader"           InvaderBot: raids the nearest enemy land and takes it home
+    "prowler"           ProwlerBot: goes to wait near the biggest territory on the map and
+                        pounces on trails it sees (25 tiles, reacts after 3 steps)
     "cutter"            CutterBot: cuts a line through enemy land inside or against
                         its own, taking the pieces the owner isn't standing in
     "hunter"            ChaserBot that goes after exposed trails up to 20 tiles away:
@@ -29,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .base import Opponent, bfs_first_action, safe_actions
-from .bots import ChaserBot, CutterBot, InvaderBot, LoopBot, RandomBot
+from .bots import ChaserBot, CutterBot, InvaderBot, LoopBot, ProwlerBot, RandomBot
 
 BOTS: dict[str, Callable[..., Opponent]] = {
     "random": lambda **kw: RandomBot(safe=False, **kw),
@@ -38,6 +40,7 @@ BOTS: dict[str, Callable[..., Opponent]] = {
     "chaser": ChaserBot,
     "invader": InvaderBot,
     "cutter": CutterBot,
+    "prowler": ProwlerBot,
     "hunter": lambda **kw: ChaserBot(**{"chase_radius": 20, "chase_max_trail": 45, **kw}),
     "stalker": lambda **kw: ChaserBot(**{"chase_radius": 80, "chase_max_trail": 90, **kw}),
     "human": lambda **kw: ChaserBot(**{"chase_radius": 40, "chase_max_trail": 60, "vision": 25, "reaction": 4, **kw}),

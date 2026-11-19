@@ -29,6 +29,8 @@ MIX = (
     "human?jitter=true",
     "hunter?jitter=true",
 )
+# tougher: prowlers that go and wait near the biggest territory (usually the agent's)
+MIX_HARD = MIX + ("prowler", "prowler", "prowler")
 
 
 def _apply(sets):
@@ -42,7 +44,7 @@ def _apply(sets):
 
 
 def _games(job):
-    actor_path, seeds, size, n_opp, steps, lag, sets = job
+    actor_path, seeds, size, n_opp, steps, lag, sets, mix = job
     _apply(sets)
     from splixrl import SplixEnv
     from splixrl.evaluation import make_actor
@@ -50,7 +52,7 @@ def _games(job):
     actor = make_actor(actor_path)
     agent = getattr(actor, "agent", None)
     cfg = {} if agent is None else {k: v for k, v in agent.obs_config.to_dict().items() if k not in ("mode", "pause_feature")}
-    env = SplixEnv(size=size, n_opponents=n_opp, opponents=list(MIX), max_steps=steps, respawn=True,
+    env = SplixEnv(size=size, n_opponents=n_opp, opponents=list(mix), max_steps=steps, respawn=True,
                    allow_pause=True, lag_prob=lag, **cfg)
     rows = []
     for seed in seeds:
@@ -82,11 +84,13 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=50_000, help="game i uses seed + i, for every actor")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--set", nargs="*", default=[], help="NAME=value settings in splixrl.options")
+    ap.add_argument("--mix", choices=["normal", "hard"], default="normal", help="hard adds prowlers")
     args = ap.parse_args(argv)
 
     seeds = [args.seed + i for i in range(args.games)]
     chunks = [seeds[i :: args.workers] for i in range(args.workers) if seeds[i :: args.workers]]
-    jobs = [(args.actor, c, args.size, args.opponents, args.steps, args.lag, args.set) for c in chunks]
+    mix = MIX_HARD if args.mix == "hard" else MIX
+    jobs = [(args.actor, c, args.size, args.opponents, args.steps, args.lag, args.set, mix) for c in chunks]
     with mp.get_context("spawn").Pool(len(jobs)) as pool:
         rows = [r for part in pool.map(_games, jobs) for r in part]
 
@@ -94,6 +98,7 @@ def main(argv=None):
     caps = np.array([c for r in rows for c in r["captures"]]) if any(r["captures"] for r in rows) else np.zeros(1)
     deaths = collections.Counter(r["death"] for r in rows if r["death"])
     label = " ".join(args.set) or "defaults"
+    label += ", hard mix" if args.mix == "hard" else ""
     print(f"{args.size}x{args.size}, {args.opponents} opponents, {n} games of {args.steps} steps ({label}):")
     print(f"  return {np.mean([r['return'] for r in rows]):.1f} | survived {np.mean([r['survived'] for r in rows]):.0%} "
           f"| kills {np.mean([r['kills'] for r in rows]):.1f} | peak land {np.mean([r['peak'] for r in rows]):.0f} "

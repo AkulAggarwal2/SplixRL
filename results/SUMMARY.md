@@ -264,3 +264,15 @@ The real arena is about 600×600 with 20–27 players (about 14,000 tiles each),
 | without strips, dent closing, cutting and the budget-based idle guard | 100% | 6,451 | 6,539 | 25 | 2.6 |
 
 No deaths at this density either way. The recent rules add 18% land, with captures about four times bigger. 7,618 tiles is 8.5% of the board, against a 7% fair share for 13 players. These are bots; people are more aggressive and adapt.
+
+**Hard real-scale mix** (`--mix hard` adds `prowler` bots: they go and wait paused near the biggest territory on the map and pounce on trails they see, 25 tiles, reacting after 3 steps). The agent now dies there, as it does against people: 70–75% survival over 20-game runs.
+
+Deaths, traced (first 20 games, 6 deaths): 5 were trail cuts while heading home from a strip or dent line. In 3 of them it knew of no enemy at all when the plan started (budget unlimited, 26–34 tile trails), and a prowler arrived from off screen. One was an 82-tile trail: a dent line kept going straight after its far end was no longer its land. **Bug fixed**: a dent line stops after its planned length.
+
+| hard mix, 2 × 20 games | deaths (of 40) | land at the end |
+|---|---|---|
+| **current (bug fixed)** | 11 | **5,362** |
+| strip trails within the budget (`SAFE_STRIPS`) | 9 | 5,132 |
+| assume an enemy 30 tiles away when none is known (`UNSEEN_REACH=30`, first 20 only) | 6 of 20 | 4,854 |
+
+`SAFE_STRIPS` is a wash at real scale (within noise, about 4% less land; normal mix 100% survival either way, 7,330 vs 7,618 land) and clearly worse on small crowded maps, so it's off by default. `UNSEEN_REACH` makes it timid without making it safer. The live client takes `--set NAME=value` (e.g. `--set SAFE_STRIPS=1`) to try either version against people.
