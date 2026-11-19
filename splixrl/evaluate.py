@@ -44,13 +44,18 @@ def main(argv=None) -> None:
     ap.add_argument("--target-frac", type=float, default=None)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--act-margin", type=float, default=0.0, help="tie-breaker: prefer straight / avoid pausing within this Q margin (0.1 works well)")
+    ap.add_argument("--reward-preset", default="v2", choices=["v1", "v2", "score", "score_rank"],
+                    help="reward the 'return' column is scored with (v2 = Round 0)")
     ap.add_argument("--out", help="CSV of every episode")
     ap.add_argument("--summary-out", help="CSV of the summary table")
     ap.add_argument("--pivot", help="also print a matrix of this metric, e.g. win_rate")
     args = ap.parse_args(argv)
 
+    from .rewards import RewardConfig
+
     env_kwargs = dict(size=args.size, max_steps=args.max_steps, n_opponents=args.n_opponents,
-                      respawn=args.respawn, target_frac=args.target_frac)
+                      respawn=args.respawn, target_frac=args.target_frac,
+                      reward=RewardConfig.preset(args.reward_preset).to_dict())
     rows = []
     for spec in args.actors:
         actor = make_actor(spec, device=args.device, act_margin=args.act_margin)

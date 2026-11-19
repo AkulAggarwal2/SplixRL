@@ -932,3 +932,12 @@ def test_enclosure_is_detected():
     assert enc is not None and enc[0] == 1 and enc[1][0, 0] and not enc[1][16, 16]
     g.owner[14:20, 20:31] = 0  # a corridor out to the open
     assert O.enclosure(g, 0) is None
+
+
+def test_round0_settings_build_the_reported_env():
+    from splixrl.experiment import ROUND0, round0_env_kwargs
+    env = SplixEnv(**round0_env_kwargs())
+    obs, _ = env.reset(seed=0)
+    assert obs["grid"].shape == (6, 15, 15) and obs["vec"].shape == (11,)
+    assert env.reward_config.death_per_cell == 0.1 and env.reward_config.lost_per_cell == 0.1  # reward v2
+    assert env.game.size == 20 and ROUND0["steps"] == 200_000

@@ -35,7 +35,7 @@ def load_agent(path: str, device: str = "cpu") -> Agent:
     ckpt = torch.load(path, map_location=device, weights_only=False)
     agent = agent_class(ckpt["algo"]).load(path, device=device)
     # Any algorithm can be an options agent: a checkpoint with an "options" dict
-    # (e.g. {"safety": 2.0, "lag_slack": 30.0}) picks plans, and evaluate / watch /
+    # (e.g. {"safety": 6.0, "lag_slack": 30.0}) picks plans, and evaluate / watch /
     # live / frozen opponents then run those plans tile by tile (splixrl.options).
     if getattr(agent, "options", None) is None and ckpt.get("options") is not None:
         agent.options = ckpt["options"]
