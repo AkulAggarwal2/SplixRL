@@ -976,3 +976,20 @@ def test_dent_lines_avoid_land_whose_owner_is_off_screen():
     plan = O.OptionRunner(0, np.random.default_rng(0))._plan_close(g, 0)
     assert plan is not None  # it still closes the dent...
     assert not any(g.owner[c] == 1 for c in plan[3])  # ...but not through their land
+
+
+
+def test_remembered_enemy_heading_my_way_is_assumed_to_keep_coming():
+    import splixrl.options as O
+    from splixrl.game import RIGHT
+    g = _blank_game(120)
+    g.owner[20:40, 20:40] = 0
+    me = g.players[0]
+    me.pos = (30, 30)
+    g.clock = 100
+    exposed = np.array([[30, 30]])
+    for heading, expect_fast in ((LEFT, True), (RIGHT, False)):
+        g.obs_memory = {0: {"seen": {"p": ((30, 90), 90)}, "heading": {"p": heading}, "maps": []}}
+        reach = O._enemy_reach(g, 0, exposed)
+        # 60 tiles away, seen 10 steps ago: full speed -> 50, half speed -> 55
+        assert reach == (50 if expect_fast else 55)

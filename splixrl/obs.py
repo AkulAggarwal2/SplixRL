@@ -455,6 +455,7 @@ def memory_planes(game: SplixGame, pid: int, w: int, horizon: int,
     for q in game.players:
         if q.alive and q.pid != pid and (visible is None or visible[q.pos]):
             mem["seen"][getattr(q, "key", q.pid)] = (q.pos, clock)
+            mem.setdefault("heading", {})[getattr(q, "key", q.pid)] = q.heading  # which way they were going
     out = np.zeros((3, w, w), np.float32)
     for key, (pos, t) in list(mem["seen"].items()):
         age = clock - t

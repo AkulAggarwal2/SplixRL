@@ -132,6 +132,7 @@ def _enemy_heads(game: SplixGame, pid: int, exclude=None) -> np.ndarray:
 
 
 MEMORY_TRUST = 30  # remembered enemies older than this many steps are ignored
+MEMORY_APPROACH = True  # a remembered enemy that was heading my way is assumed to keep coming at full speed
 MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many tiles per step since seen
 # Loops are sized to fit the safety budget before they start (out + along <=
 # BUDGET_SHARE * (nearest enemy reach - cushion)), so they finish as rectangles
@@ -210,6 +211,7 @@ MAX_CLOSE = 30  # longest line across a dent
 CLOSE_WINDOW = 60
 FAILED_LINE_MEMORY = True  # a line that took far less than planned isn't retried for a while
 FAILED_LINE_COOLDOWN = 300
+LINE_REACH_CHECK = True  # a line is only drawn if no enemy, seen or remembered, could reach any tile of it first
 CLOSE_GUARD_ENEMY_LAND = True  # a dent line may cross someone's land only if its owner is on screen and loses the race
 CLOSE_BUDGET_FACTOR = 1.0  # a line may be this many safety budgets long
 CUT_SLACK = 1  # the owner must need more than (tiles left to cross + this) steps to reach my line
@@ -234,12 +236,18 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray, exclude=None) -
         # VIEW + 1 - (how far the cell is from my head) steps to reach that cell.
         head = np.array(game.players[pid].pos)
         unseen = np.maximum(0, VIEW + 1 - UNSEEN_MARGIN - np.abs(exposed - head).max(1))
+        headings = mem.get("heading", {})
+        me_pos = np.array(game.players[pid].pos)
         for key, (pos, t) in mem.get("seen", {}).items():
             if exclude is not None and key == exclude:
                 continue
             age = clock - t
             if 0 < age <= MEMORY_TRUST:
-                guess = np.abs(exposed - np.array(pos)).sum(1) - MEMORY_SPEED * age
+                speed = MEMORY_SPEED
+                h = headings.get(key)
+                if MEMORY_APPROACH and h is not None and float(DIRS[h] @ (me_pos - np.array(pos))) > 0:
+                    speed = 1.0  # it was heading my way when I lost sight of it: assume it kept coming
+                guess = np.abs(exposed - np.array(pos)).sum(1) - speed * age
                 d = max(0, int(np.maximum(guess, unseen).min()))
                 best = d if best is None else min(best, d)
     return best
@@ -988,6 +996,8 @@ class OptionRunner:
                         continue
                     if CLOSE_GUARD_ENEMY_LAND and not self._may_cross(game, pid, [(x + r0, y + c0) for x, y in cells]):
                         continue
+                    if LINE_REACH_CHECK and not self._line_safe(game, pid, [(x + r0, y + c0) for x, y in cells]):
+                        continue
                     mask = own.copy()
                     for c in cells:
                         mask[c] = True
@@ -1023,6 +1033,18 @@ class OptionRunner:
                         best, best_rate = (start, h, gain, line, None), rate
         return best
 
+    def _line_safe(self, game, pid, cells) -> bool:
+        """Could any enemy, seen or remembered, reach a tile of this line before I'm across it?"""
+        line = np.array(cells, dtype=np.int64).reshape(-1, 2)
+        reach = _enemy_reach(game, pid, line)
+        return reach is None or reach - self.threshold > len(cells) + 1
+
+    def _line_safe_except(self, game, pid, cells, owner) -> bool:
+        """_line_safe, not counting the cut's own target (its race is checked separately)."""
+        line = np.array(cells, dtype=np.int64).reshape(-1, 2)
+        reach = _enemy_reach(game, pid, line, exclude=getattr(owner, "key", owner.pid))
+        return reach is None or reach - self.threshold > len(cells) + 1
+
     def _may_cross(self, game, pid, cells) -> bool:
         """Can a line over these cells be crossed safely, given whose land it runs over?
         On their own land an owner can cut my trail at no risk: only when that owner
@@ -1052,7 +1074,10 @@ class OptionRunner:
             d = int(np.abs(np.array(line) - np.array(q.pos)).sum(1).min())
             return d > len(line) + 1 + CUT_SLACK
 
-        plan = plan_cut(game, pid, reach=VIEW, ok=winnable)
+        def winnable_and_safe(line, q):
+            return winnable(line, q) and (not LINE_REACH_CHECK or self._line_safe_except(game, pid, line, q))
+
+        plan = plan_cut(game, pid, reach=VIEW, ok=winnable_and_safe)
         if plan is None or (FAILED_LINE_MEMORY and _bad_line(game, pid, plan[0], plan[1])):
             return None
         start, h, gain, line, owner_pid = plan
@@ -1087,6 +1112,8 @@ class OptionRunner:
                 return self._step_inside(game, pid)  # the owner came close: not now
             if key is None and self._budget(game, pid) < (len(line) + 1) / 2:
                 return self._step_inside(game, pid)  # closing a dent: someone came closer while I walked
+            if LINE_REACH_CHECK and key is None and not self._line_safe(game, pid, line):
+                return self._step_inside(game, pid)  # someone could now reach the line before I'm across
             self.phase = "to_start"
             T = (start[0] + int(DIRS[h, 0]), start[1] + int(DIRS[h, 1]))
             goal = np.zeros_like(game.owner, dtype=bool)
