@@ -5,6 +5,7 @@ from splixrl.game import (
     DOWN,
     EMPTY,
     LEFT,
+    PAUSE,
     RIGHT,
     STRAIGHT,
     TURN_LEFT,
@@ -200,3 +201,70 @@ def test_losing_all_territory_eliminates():
     p1 = g.players[1]
     assert not p1.alive and p1.death_cause == "territory_lost" and p1.killed_by == 0
     assert p0.kills == 1
+
+
+
+def _enclave_game():
+    g = SplixGame(size=40, n_players=2)
+    g.reset(np.random.default_rng(0))
+    me, en = g.players
+    g.owner.fill(EMPTY)
+    g.trail.fill(EMPTY)
+    g.owner[5:30, 5:30] = 1  # enemy territory
+    g.owner[14:20, 12:24] = 0  # my 6 x 12 enclave inside it
+    me.pos, me.heading, me.trail = (16, 14), 0, []  # I'm in its left half
+    return g, me, en
+
+
+def test_surrounding_my_land_takes_none_of_it_while_i_stand_in_it():
+    g, me, en = _enclave_game()
+    en.pos, en.heading, en.trail = (6, 29), 1, []
+    for a in [STRAIGHT, TURN_RIGHT, TURN_RIGHT]:  # a tiny loop on its east edge
+        g.step([PAUSE, a])
+    assert (g.owner == 0).sum() == 72 and me.alive
+
+
+def test_a_line_through_my_land_takes_the_piece_im_not_in():
+    g, me, en = _enclave_game()
+    # the enemy runs a line down through the middle of my enclave (column 18)
+    en.pos, en.heading, en.trail = (13, 18), 2, []
+    for _ in range(7):
+        g.step([PAUSE, STRAIGHT])
+    assert g.owner[20, 18] == 1  # back on its own land below: the loop closed
+    assert (g.owner[14:20, 19:24] == 1).all()  # the right piece, without my head, is theirs
+    assert (g.owner[14:20, 12:18] == 0).all() and me.alive  # the piece I'm in is still mine
+
+
+def test_encircling_an_enemy_takes_nothing_while_its_head_is_inside():
+    g = SplixGame(size=30, n_players=2)
+    g.reset(np.random.default_rng(0))
+    me, en = g.players
+    g.owner.fill(EMPTY)
+    g.trail.fill(EMPTY)
+    g.owner[2:5, 2:20] = 0
+    g.owner[12:15, 12:15] = 1
+    en.pos, en.heading, en.trail = (13, 13), 0, []
+    # my trail: down from my land, left, and back up, around the enemy's land
+    me.trail = [(r, 18) for r in range(5, 19)] + [(18, c) for c in range(17, 8, -1)] + [(r, 9) for r in range(17, 4, -1)]
+    for cell in me.trail:
+        g.trail[cell] = 0
+    me.pos, me.heading = (5, 9), 0
+    g.step([STRAIGHT, PAUSE])  # up onto my land: the loop closes
+    assert g.owner[4, 9] == 0 and not me.trail
+    assert (g.owner[12:15, 12:15] == 1).all() and en.alive  # it stood inside: nothing taken
+    assert g.owner[10, 15] == EMPTY  # nor the empty land around it
+    assert g.owner[18, 12] == 0  # the trail itself is mine
+
+
+
+def test_cutter_bot_takes_the_part_of_an_enclave_its_owner_isnt_in():
+    from splixrl.opponents import make_opponent
+
+    g, me, en = _enclave_game()
+    en.pos, en.heading, en.trail = (8, 20), 2, []
+    bot = make_opponent("cutter")
+    bot.reset(g, 1, np.random.default_rng(0))
+    for _ in range(40):
+        g.step([PAUSE, bot.act(g, 1)])
+    mine = g.owner == 0
+    assert me.alive and mine[16, 14] and 0 < mine.sum() < 72  # kept the piece I'm in, lost the rest

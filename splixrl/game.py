@@ -18,7 +18,14 @@ Rules, resolved simultaneously every step:
    the kill.
 5. Dead players lose their territory and trail; their cells become empty.
 6. Survivors move. On their own territory with a trail, they capture; off
-   their territory, the cell is added to their trail.
+   their territory, the cell is added to their trail. A capture takes the
+   trail and every region it and the territory enclose -- except regions next
+   to another living player's head or to the start of their trail, as on the
+   real server (gameServer/src/gameplay/arenaWorker/updateCapturedArea.js
+   seeds its flood fill there "since we don't want players to just fill a
+   large area around another player"). So surrounding someone's land takes
+   none of it while they stand in it; cutting a line through it takes the
+   pieces they aren't in.
 7. A living player left with no territory dies ("territory_lost"); the player
    who captured its last cell gets the kill.
 
@@ -38,7 +45,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, label
 
 UP, RIGHT, DOWN, LEFT = 0, 1, 2, 3
 # (row delta, col delta) for each heading
@@ -298,7 +305,24 @@ class SplixGame:
 
     def _capture(self, p: Player, ev: StepEvents, last_taker: dict[int, int]) -> None:
         mask = (self.owner == p.pid) | (self.trail == p.pid)
-        gained = binary_fill_holes(mask) & (self.owner != p.pid)
+        enclosed = binary_fill_holes(mask) & ~mask
+        if enclosed.any():
+            # regions next to another player's head or trail start stay as they are
+            n = self.size
+            seeds = []
+            for q in self.players:
+                if not q.alive or q.pid == p.pid:
+                    continue
+                for r, c in [q.pos] + ([q.trail[0]] if q.trail else []):
+                    for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        rr, cc = r + dr, c + dc
+                        if 0 <= rr < n and 0 <= cc < n and enclosed[rr, cc]:
+                            seeds.append((rr, cc))
+            if seeds:
+                labels, _ = label(enclosed)
+                protected = np.unique([labels[cell] for cell in seeds])
+                enclosed &= ~np.isin(labels, protected)
+        gained = (enclosed | (self.trail == p.pid)) & (self.owner != p.pid)
         victims, counts = np.unique(self.owner[gained], return_counts=True)
         for v, n in zip(victims.tolist(), counts.tolist()):
             if v != EMPTY:

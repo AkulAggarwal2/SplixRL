@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ..game import N_ACTIONS, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
+from ..game import DIRS, N_ACTIONS, STRAIGHT, TURN_LEFT, TURN_RIGHT, SplixGame
 from .base import Opponent, bfs_first_action, safe_actions
 
 
@@ -282,4 +282,96 @@ class InvaderBot(LoopBot):
                         self.phase = "out"
                         self.leg, self.leg_left = 1, 0
                     return a
+        return super().act(game, pid)
+
+
+class CutterBot(LoopBot):
+    """Cuts enemy land that sits inside or against its own: drives a straight
+    line across the enemy patch, from its land to its land, on the side away
+    from the owner's head. Under the real server's rule the piece the owner
+    is standing in is safe, and everything the line cuts off is captured --
+    what people do to a player who spawned or got stuck inside their land.
+    Otherwise plays like LoopBot."""
+
+    name = "cutter"
+
+    def __init__(self, reach: int = 30, **kw):
+        super().__init__(**kw)
+        self.reach = reach
+
+    def reset(self, game: SplixGame, pid: int, rng: np.random.Generator) -> None:
+        super().reset(game, pid, rng)
+        self.cut = None  # (start cell on my land, direction across)
+
+    def _plan(self, game: SplixGame, pid: int):
+        from scipy.ndimage import binary_fill_holes
+
+        own = game.owner == pid
+        if not own.any():
+            return None
+        closed = binary_fill_holes(own)
+        me = np.array(game.players[pid].pos)
+        best, best_score = None, 3
+        for q in game.players:
+            if not q.alive or q.pid == pid:
+                continue
+            patch = closed & (game.owner == q.pid)
+            if not patch.any():
+                continue
+            hr, hc = q.pos
+            cells = np.argwhere(patch)
+            for axis in (0, 1):  # 0: a horizontal line (fixed row), 1: vertical (fixed column)
+                for line in np.unique(cells[:, axis]):
+                    if abs(int(line) - (hr if axis == 0 else hc)) <= 1:
+                        continue  # too close to its head
+                    span = cells[cells[:, axis] == line][:, 1 - axis]
+                    a, b = int(span.min()), int(span.max())
+                    path = [(int(line), k) if axis == 0 else (k, int(line)) for k in range(a, b + 1)]
+                    ends = [(int(line), a - 1), (int(line), b + 1)] if axis == 0 else [(a - 1, int(line)), (b + 1, int(line))]
+                    n = game.size
+                    if not all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in ends):
+                        continue
+                    if any(own[x, y] or (x, y) == (hr, hc) for x, y in path):
+                        continue
+                    # what the line cuts off: patch cells on the far side from the head
+                    side = cells[:, axis] - int(line)
+                    head_side = (hr if axis == 0 else hc) - int(line)
+                    score = int(np.count_nonzero(np.sign(side) == -np.sign(head_side)))
+                    start = min(ends, key=lambda e: abs(e[0] - me[0]) + abs(e[1] - me[1]))
+                    if abs(start[0] - me[0]) + abs(start[1] - me[1]) > self.reach:
+                        continue
+                    other = ends[1] if start == ends[0] else ends[0]
+                    h = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1]))) == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
+                    if score > best_score:
+                        best, best_score = (start, h), score
+        return best
+
+    def act(self, game: SplixGame, pid: int) -> int:
+        p = game.players[pid]
+        own = game.owner == pid
+        if self.cut is not None and p.trail:  # crossing: straight on until back on my land
+            if game.is_safe(pid, STRAIGHT):
+                return STRAIGHT
+            self.cut = None
+            return self.go_home(game, pid)
+        if own[p.pos] and not p.trail:
+            if self.cut is None or self.rng.random() < 0.02:
+                self.cut = self._plan(game, pid)
+            if self.cut is not None:
+                start, h = self.cut
+                T = (start[0] + int(DIRS[h, 0]), start[1] + int(DIRS[h, 1]))
+                goal = np.zeros_like(own)
+                goal[T] = True
+                blocked = ~own
+                for side in ((h + 1) % 4, (h + 3) % 4):  # step out from the start cell itself, facing across
+                    x, y = T[0] + int(DIRS[side, 0]), T[1] + int(DIRS[side, 1])
+                    if 0 <= x < game.size and 0 <= y < game.size:
+                        blocked[x, y] = True
+                blocked[T] = False
+                a = bfs_first_action(game, pid, goal, blocked, self._order())
+                if a is not None and game.is_safe(pid, a):
+                    return a
+                self.cut = None
+        elif self.cut is not None and not p.trail:
+            self.cut = None
         return super().act(game, pid)

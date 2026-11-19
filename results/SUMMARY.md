@@ -202,3 +202,15 @@ Within noise of C, and slightly more deaths, so C stays `BEST_OPTIONS_AGENT.pt`.
 * **Caveats to state.** Evaluations are 24–60 games, so differences under about 10% of return or 2–3 deaths are noise. Results are against bots, and the `human` bot is an approximation of how people play.
 * **Time on own land.** With nobody on screen, the agent spends 7% (64×64) to 15% (96×96) of steps on its own land: mostly walking to the start of the next strip (4–11%), and actually waiting under 1%. Making the walk count 3× against a strip (prefer nearby edges) was worse: crowded deaths 6 → 10 of 48, return 160 → 150; sparse peak land 2623 → 2403. Walking over its own land is safe, and the better strip pays for it, so the weight stays 1.
 * **Live client ghosts.** The client kept other players until the server sent a remove message, and extrapolated their positions with no time limit. A paused or drifting ghost near the agent's land looked like an enemy on screen and kept it at home. It now drops players guessed to be more than 25 tiles away (the server only reports players within that range) and paused players silent for 10 s. Not tested against a server yet.
+
+## The capture rule was wrong in the simulator (fixed Nov 19)
+
+The server's capture code (`gameServer/src/gameplay/arenaWorker/updateCapturedArea.js`) flood-fills from outside **and from next to every other living player's head and the start of their trail** (`Game.getUnfillableLocations`), "since we don't want players to just fill a large area around another player". So a region with another player in it is never captured. Our engine captured everything enclosed. Consequences in the real game, now also in the engine (tests in `tests/test_game.py`):
+* Surrounding someone's land takes none of it while they stand in it, and encircling an enemy doesn't take its land or kill it.
+* Cutting a line through someone's land takes the pieces they aren't standing in. That's what people do to a player inside their land (spotted by Ahaan in real games).
+
+New bot `cutter`: finds enemy land inside its own and cuts a straight line through it, on the side away from the owner's head.
+
+Re-measured under the real rule (same fixed games, run C, current rules): crowded return 153.8 (was 160.5 under the old rule), deaths 8 of 48 (was 6); sparse return 346.3 (was 336.4), deaths 3 of 24 (was 3). Within noise, so the rule ablations above still hold; they weren't re-run.
+
+**Enclaves** (agent's 5×5 spawn inside a cutter's 13×13 or 19×19 block, 400 steps): the agent survived 42 of 46 games and grew out of the enclosure in all of them, because its ordinary strips through the encloser's land are exactly the edge-taking that breaks an enclosure. The old "enclaves are hopeless" result was an artefact of the wrong rule. The break-out reflex adds nothing (land at the end 560 vs 607 and 694 vs 706 with it on vs off), so it's off.

@@ -147,7 +147,7 @@ HUG_EDGE = True
 # If all my land is a hole inside one enemy's land, their next loop anywhere
 # takes all of it (and I die with no land left): cut a strip out to the
 # open first.
-BREAK_OUT = True
+BREAK_OUT = False  # under the real capture rule it adds nothing (see SUMMARY)
 # Turn one tile early when the tile after next is a wall or my own trail: a
 # turn that lands a tile late (lag) then still lands safely. Most deaths in
 # simulation were wall hits from last-tile turns.
