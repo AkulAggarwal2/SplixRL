@@ -118,7 +118,9 @@ def _free_run(game: SplixGame, pid: int, h: int, limit: int = 20) -> int:
     return run
 
 MAX_OPTION_STEPS = 90
-DEFEND_RADIUS = 15  # cut an enemy trail lying on my land when it is this close
+DEFEND_RADIUS = 15
+DEFEND_RACE_ONLY = True  # go for an enemy trail on my land only if I get there before its owner is home (live deaths)
+DEFEND_SLACK = 1  # cut an enemy trail lying on my land when it is this close
 VIEW = 25  # options only look this far (the server's range)
 ORDER = [STRAIGHT, TURN_LEFT, TURN_RIGHT]
 
@@ -388,7 +390,9 @@ class OptionRunner:
         if not self._late_turn_fatal(game, pid, h, nxt):
             return a
         own = np.argwhere(game.owner == pid)
-        best, best_d = a, None
+        p = game.players[pid]
+        on_land = bool(game.owner[p.pos] == pid)
+        best, best_key = a, None
         for t in (STRAIGHT, TURN_LEFT, TURN_RIGHT):
             if t == a or not game.is_safe(pid, t):
                 continue
@@ -396,8 +400,12 @@ class OptionRunner:
             if self._late_turn_fatal(game, pid, h, nxt):
                 continue
             d = int(np.abs(own - np.array(nxt)).sum(1).min()) if len(own) else 0
-            if best_d is None or d < best_d:
-                best, best_d = t, d
+            leaves = on_land and game.owner[nxt] != pid  # don't let the backstop walk me off my land
+            key = (leaves, d)
+            if best_key is None or key < best_key:
+                best, best_key = t, key
+        if best != a and on_land and best_key is not None and best_key[0]:
+            self.notes.append("early-turn backstop had to step off my land")
         return best
 
     def _step_inside(self, game, pid):
@@ -449,7 +457,9 @@ class OptionRunner:
             invader = self._invasion(game, pid, at_home)
             if invader is not None:
                 if self.defended == 0:
-                    self.notes.append("defend reflex: going for an enemy trail on my land")
+                    mine_d, home_d = getattr(self, "defend_race", (None, None))
+                    self.notes.append(f"defend reflex: going for an enemy trail on my land "
+                                      f"(it's {mine_d} tiles away, its owner is {home_d} from home)")
                 self.defended += 1
                 if not at_home:  # out on a plan: get home first, then cut it from my own land
                     return self._go_home(game, pid)
@@ -568,8 +578,13 @@ class OptionRunner:
             mine_d = detour + int(np.abs(np.argwhere(theirs) - me).sum(1).min())
             their_land = np.argwhere(game.owner == q.pid)
             home_d = int(np.abs(their_land - np.array(q.pos)).sum(1).min()) if len(their_land) else 99
-            if mine_d <= DEFEND_RADIUS or mine_d <= home_d + 2:
+            if DEFEND_RACE_ONLY:
+                ok = mine_d + DEFEND_SLACK <= home_d  # I get there before it can close its loop
+            else:
+                ok = mine_d <= DEFEND_RADIUS or mine_d <= home_d + 2
+            if ok:
                 worth |= theirs
+                self.defend_race = (mine_d, home_d)
         return worth if worth.any() else None
 
     def _defend_old(self, game, pid):  # kept for reference; replaced by _invasion
