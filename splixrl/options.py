@@ -185,6 +185,16 @@ STRIP_WALK_WEIGHT = 1.0  # how much a step walking over my land to the strip's s
 # the server gives me every piece the owner isn't standing in. Only when the
 # owner can't reach the line before I'm across it.
 CUT_REFLEX = True
+# Close dents: a straight trail across the mouth of a dent in my land, from my
+# land to my land, takes the whole dent. Chosen over a strip when it gains
+# more land per step.
+CLOSE_DENTS = True
+MAX_CLOSE = 30  # longest line across a dent
+# The line stays on screen (where trails and heads are visible), but what it
+# would capture is worked out over CLOSE_WINDOW tiles each way, from my
+# remembered land and the minimap, so a dent bigger than the screen counts whole.
+CLOSE_WINDOW = 60
+CLOSE_BUDGET_FACTOR = 1.0  # a line may be this many safety budgets long
 CUT_SLACK = 1  # the owner must need more than (tiles left to cross + this) steps to reach my line
 BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
 
@@ -448,6 +458,18 @@ class OptionRunner:
             plan = self._plan_strip(game, pid)
             if plan is not None:
                 self.kind, self.strip = "strip", plan
+            if CLOSE_DENTS:
+                close = self._plan_close(game, pid)
+                if close is not None:
+                    start, h, gain, line, _ = close
+                    walk = int(abs(start[0] - p.pos[0]) + abs(start[1] - p.pos[1]))
+                    rate = gain / (len(line) + 1 + walk)
+                    strip_rate = 0.0
+                    if plan is not None:
+                        sh, sS, st, sL, sd = plan
+                        strip_rate = sL * sd / (sL + 2 * sd + abs(sS[0] - p.pos[0]) + abs(sS[1] - p.pos[1]))
+                    if rate > strip_rate:
+                        self.kind, self.cutting = "cut", close
         if at_home and self.idle_guard and self.kind in ("home", "ambush", "attack") and self.phase is None \
                 and self._nothing_to_wait_for(game, pid):
             # nothing to wait for or attack: expand instead of idling
@@ -861,6 +883,86 @@ class OptionRunner:
             return self._step_inside(game, pid)
         return a
 
+    def _plan_close(self, game, pid):
+        """Best straight line across a dent in my land, as (start, h, gain, line, None)."""
+        from scipy.ndimage import binary_fill_holes, label
+
+        p = game.players[pid]
+        n = game.size
+        budget = self._budget(game, pid)
+        if budget < MIN_LOOP:
+            return None
+        me = np.array(p.pos)
+        # lines: within view. Captures: over the wider window.
+        R = max(VIEW, CLOSE_WINDOW)
+        r0, r1 = max(0, me[0] - R), min(n, me[0] + R + 1)
+        c0, c1 = max(0, me[1] - R), min(n, me[1] + R + 1)
+        own = (game.owner == pid)[r0:r1, c0:c1]
+        if not own.any():
+            return None
+        busy = (game.trail != EMPTY)[r0:r1, c0:c1].copy()
+        heads = []
+        for q in game.players:
+            if q.alive and q.pid != pid:
+                if r0 <= q.pos[0] < r1 and c0 <= q.pos[1] < c1:
+                    busy[q.pos[0] - r0, q.pos[1] - c0] = True
+                for cell in [q.pos] + ([q.trail[0]] if q.trail else []):
+                    heads.append((cell[0] - r0, cell[1] - c0))
+        vr0, vr1 = max(0, me[0] - VIEW) - r0, min(n, me[0] + VIEW + 1) - r0  # the view, in window coordinates
+        vc0, vc1 = max(0, me[1] - VIEW) - c0, min(n, me[1] + VIEW + 1) - c0
+        # the whole line is exposed: it must fit in about twice the budget
+        # (halfway across, either end is equally close)
+        max_len = int(min(MAX_CLOSE, CLOSE_BUDGET_FACTOR * budget))
+        H, W = own.shape
+        best, best_rate = None, 0.0
+        def on_screen(cell):
+            return vr0 <= cell[0] < vr1 and vc0 <= cell[1] < vc1
+
+        for axis in (0, 1):
+            # lines start on screen (the screen moves along as I cross); their far end can be off it
+            for k in range(vr0, vr1) if axis == 0 else range(vc0, vc1):
+                row = own[k, :] if axis == 0 else own[:, k]
+                idx = np.flatnonzero(row)
+                for a, b in zip(idx[:-1], idx[1:]):
+                    gap = int(b - a - 1)
+                    if gap < 2 or gap > max_len:
+                        continue
+                    end_a, end_b = ((k, int(a)), (k, int(b))) if axis == 0 else ((int(a), k), (int(b), k))
+                    if not (on_screen(end_a) or on_screen(end_b)):
+                        continue
+                    cells = [(k, j) if axis == 0 else (j, k) for j in range(a + 1, b)]
+                    if any(busy[c] for c in cells):
+                        continue
+                    mask = own.copy()
+                    for c in cells:
+                        mask[c] = True
+                    enclosed = binary_fill_holes(mask) & ~mask
+                    if enclosed.any() and heads:
+                        labels, _ = label(enclosed)
+                        prot = {labels[x + dx, y + dy] for x, y in heads for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                                if 0 <= x + dx < H and 0 <= y + dy < W}
+                        prot.discard(0)
+                        if prot:
+                            enclosed &= ~np.isin(labels, list(prot))
+                    gain = int(np.count_nonzero(enclosed)) + gap
+                    if gain < 2 * gap + 4:  # a line that takes little more than itself isn't a dent
+                        continue
+                    ends = [e for e in (end_a, end_b) if on_screen(e)] or [end_a, end_b]
+                    ends = [(x + r0, y + c0) for x, y in ends]
+                    start = min(ends, key=lambda e: abs(e[0] - me[0]) + abs(e[1] - me[1]))
+                    ends = [(x + r0, y + c0) for x, y in (end_a, end_b)]
+                    other = ends[1] if start == ends[0] else ends[0]
+                    walk = int(abs(start[0] - me[0]) + abs(start[1] - me[1]))
+                    rate = gain / (gap + 1 + walk)
+                    if rate > best_rate:
+                        h = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1])))
+                             == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
+                        line = [(x + r0, y + c0) for x, y in cells]
+                        if start != ends[0]:
+                            line = line[::-1]
+                        best, best_rate = (start, h, gain, line, None), rate
+        return best
+
     def _plan_cut(self, game, pid):
         from .opponents.bots import plan_cut
 
@@ -899,8 +1001,10 @@ class OptionRunner:
         if at_home:
             if self.phase not in (None, "to_start"):
                 return self._go_home(game, pid)
-            if not self._cut_race_ok(game, pid, at_start=True) or self.steps > 30:
+            if not self._cut_race_ok(game, pid, at_start=True) or self.steps > 60:
                 return self._step_inside(game, pid)  # the owner came close: not now
+            if key is None and self._budget(game, pid) < (len(line) + 1) / 2:
+                return self._step_inside(game, pid)  # closing a dent: someone came closer while I walked
             self.phase = "to_start"
             T = (start[0] + int(DIRS[h, 0]), start[1] + int(DIRS[h, 1]))
             goal = np.zeros_like(game.owner, dtype=bool)

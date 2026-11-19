@@ -229,3 +229,13 @@ No deaths in any of these. Fixed games (no enclosed enemies there, so it rarely 
 * The live client's lag estimate goes up to 0.2, so the cushion reached 12 tiles, against at most 9 in training (lag 0–0.1) and 7.5 in every test. With anyone seen recently, every plan shrank to about 3 × 5 tiles. Now `LAG_CAP = 0.1`: the cushion never accounts for more lag than was trained and tested.
 * The idle guard (expand instead of waiting) only fired with nobody on screen, and on a busy server someone always is. It now goes by the safety budget: with room for a strip of 12 or more and no enemy trail in view, expand. Busy map (128×128, 10 opponents, 18 games): return 296.7 → 304.5, peak 2322 → 2413, deaths 3 → 3. A budget of 8 was too bold (6 deaths). Crowded and sparse fixed games: within noise.
 * `python -m splixrl.live ... --explain` prints one line per plan: what it chose, its size, the budget, the cushion and lag estimate, and the nearest known enemy.
+
+**Closing dents** (`CLOSE_DENTS`; spotted by Ahaan in a real game: big dents in its land, filled by many small extensions instead of one closing line). A straight line across a dent's mouth, from my land to my land, takes the whole dent. Candidates are lines that start on screen. What each would capture is worked out under the real capture rule over 60 tiles each way (`CLOSE_WINDOW`), from remembered land plus the minimap, so dents bigger than the screen count whole. On a U with 50-tile arms, the screen-only planner found nothing; with the wider view, one 24-tile line took 816 → 1944 tiles in 27 steps. It's chosen over a strip when it gains more per step. Safety: the line must fit one safety budget (`CLOSE_BUDGET_FACTOR`), the budget is checked again when it steps off its land, and the usual abort rule applies on the way across.
+
+| | U-shaped dent (20 games), land gained | crowded: return / deaths (48) | sparse: return / deaths (24) | busy 128×128: return / deaths (18) |
+|---|---|---|---|---|
+| off | 577 | 152.3 / 7 | 341.3 / 2 | 304.5 / 3 |
+| lines up to 2 budgets | 666 | 150.5 / 10 | 348.6 / 3 | 324.5 / 4 |
+| **lines up to 1 budget** | 634 | **157.9** / 8 | **358.2 / 1** | **335.9 / 2** |
+
+The 2-budget version takes more land but dies more (17 vs 12 of 90 deaths, first version). With one budget it's about as safe as before (11 vs 12 of 90) and gets 4–10% more return, so that's on.
