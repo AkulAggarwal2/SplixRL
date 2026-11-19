@@ -189,6 +189,8 @@ MAX_STRIP = 24
 MAX_DEPTH = 8
 STRIP_SKIP_HOLES = True  # no strips into holes in my land (enclosed enemy land is for the cut)
 GLOBAL_FILL = True  # strips prefer keeping my WHOLE territory compact (area / bounding box), not just the part in view
+SAFE_STRIPS_KNOWN = False  # the same whenever any enemy is known, on screen or remembered (being tested)
+SAFE_STRIPS_ON_SCREEN = True  # with an enemy on screen, a strip's whole trail must fit the safety budget (live deaths)
 SAFE_STRIPS = False  # tested: strips got too small, more trips and more deaths. Was: a strip's whole trail must fit in the safety budget (it used to be the size, so the trail could be out twice as long)
 STRIP_EXPOSURE_WEIGHT = 0.5  # a step with my trail out costs this much more than a step walking on my land
 CORNER_GAP = 3  # a corner start may bridge this many tiles between the strip and my land
@@ -733,6 +735,8 @@ class OptionRunner:
             return None
         d_cap = int(np.clip(budget // 2, 2, MAX_DEPTH))
         me = np.array(p.pos)
+        enemy_on_screen = len(_enemy_heads(game, pid)) > 0
+        enemy_known = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64)) is not None
         R = max(VIEW, STRIP_WINDOW)  # edges this far away count too (walking there is on my land)
         r0, r1 = max(0, me[0] - R), min(n, me[0] + R + 1)
         c0, c1 = max(0, me[1] - R), min(n, me[1] + R + 1)
@@ -831,7 +835,8 @@ class OptionRunner:
                                     options.append((ph, side[-1], (h + 2) % 4, d + 1, L + g, L + g + d))
                                     break
                         for h1, S1, turn_to, side_len, out_len, trail in options:
-                            if SAFE_STRIPS and trail > budget:
+                            if (SAFE_STRIPS or (SAFE_STRIPS_ON_SCREEN and enemy_on_screen)
+                                    or (SAFE_STRIPS_KNOWN and enemy_known)) and trail > budget:
                                 continue  # the trail would be out longer than an enemy needs to get here
                             walk = int(np.abs(np.array(S1) - me).sum())
                             if walk > STRIP_MAX_WALK:
@@ -1277,6 +1282,12 @@ def _land_count(game: SplixGame, pid: int) -> int:
     return int(c) if c is not None else int(np.count_nonzero(game.owner == pid))
 
 
+def _map_land(game: SplixGame, pid: int) -> int:
+    """My land on my own map. Captures show up here at once; the server's tile
+    count (land_count) arrives a few moves late, so plans are judged by this."""
+    return int(np.count_nonzero(game.owner == pid))
+
+
 def _bad_line(game: SplixGame, pid: int, start, h) -> bool:
     mem = (getattr(game, "obs_memory", None) or {}).get(pid) or {}
     until = mem.get("bad_lines", {}).get((tuple(start), int(h)))
@@ -1395,7 +1406,7 @@ class OptionsActor:
         if started is None or not FAILED_LINE_MEMORY:
             return
         start, h, expected, count0 = started
-        got = _land_count(game, pid) - count0
+        got = _map_land(game, pid) - count0
         if got < 0.3 * expected:
             mem = game.obs_memory.setdefault(pid, {"seen": {}, "maps": []}) if getattr(game, "obs_memory", None) is not None else None
             if mem is not None:
@@ -1409,12 +1420,17 @@ class OptionsActor:
         p = game.players[pid]
         self.trail_max = max(getattr(self, "trail_max", 0), len(p.trail))
         if r.kind != kind0:
-            print(f"[plan]   -> now {r.kind}", flush=True)
+            size = ""
+            if r.kind == "strip":
+                size = f" {r.strip[3]} long x {r.strip[4]} deep"
+            elif r.kind == "cut" and r.cutting is not None:
+                size = f" across {len(r.cutting[3])}, takes {r.cutting[2]}"
+            print(f"[plan]   -> now {r.kind}{size}", flush=True)
         for note in r.notes[getattr(self, "notes_shown", 0):]:
             print(f"[plan]   {note}", flush=True)
         self.notes_shown = len(r.notes)
         if finished:
-            gained = _land_count(game, pid) - getattr(self, "land_at_start", _land_count(game, pid))
+            gained = _map_land(game, pid) - getattr(self, "land_at_start", _map_land(game, pid))
             print(f"[plan]   done: longest trail {self.trail_max}, land {gained:+d}", flush=True)
 
     def reset(self, env, seed: int) -> None:
@@ -1446,10 +1462,10 @@ class OptionsActor:
         lag = float(getattr(game, "lag_estimate", 0.0))
         self.run = OptionRunner(option, self.rng, lag=lag, can_pause=getattr(env, "allow_pause", True),
                                 safety=self.safety, lag_slack=self.lag_slack)
-        self.trail_max, self.notes_shown, self.land_at_start = 0, 0, _land_count(game, pid)
+        self.trail_max, self.notes_shown, self.land_at_start = 0, 0, _map_land(game, pid)
         a = self.run.act(game, pid)
         if self.run.kind == "cut" and self.run.cutting is not None:
-            self.line_started = (self.run.cutting[0], self.run.cutting[1], self.run.cutting[2], _land_count(game, pid))
+            self.line_started = (self.run.cutting[0], self.run.cutting[1], self.run.cutting[2], _map_land(game, pid))
         if self.explain:
             self._explain(game, pid, option)
             for note in self.run.notes:
