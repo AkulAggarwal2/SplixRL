@@ -9,3 +9,7 @@ plots/*
 *.gif
 .DS_Store
 .splix-server/
+
+# live session logs
+live.log
+*.live.log
