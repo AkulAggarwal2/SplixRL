@@ -876,3 +876,59 @@ def test_options_agent_save_load_evaluate_and_freeze(tmp_path):
     rows = evaluate(actor, dict(size=24, max_steps=200, lag_feature=True), ["loop", f"frozen:{path}"], 2)
     assert len(rows) == 4 and all(r["length"] > 0 for r in rows)
     assert len(actor.chosen) > 2  # it picked several options per game, not one per tile
+
+
+def _blank_game(size=60):
+    from splixrl.game import SplixGame
+    g = SplixGame(size=size, n_players=2)
+    g.reset(np.random.default_rng(0))
+    g.owner.fill(EMPTY)
+    g.trail.fill(EMPTY)
+    g.players[1].pos = (size - 5, size - 5)
+    g.owner[size - 6 : size - 3, size - 6 : size - 3] = 1
+    return g
+
+
+def test_strips_grow_one_compact_block():
+    import splixrl.options as O
+    g = _blank_game()
+    g.owner[20:30, 20:26] = 0
+    g.owner[30:34, 20:22] = 0  # a small peninsula
+    g.players[0].pos, g.players[0].heading = (25, 23), UP
+    for _ in range(3):
+        r = O.OptionRunner(0, np.random.default_rng(0))
+        plan = r._plan_strip(g, 0)
+        assert plan is not None
+        r.kind, r.strip = "strip", plan
+        for _ in range(90):
+            a = r.act(g, 0)
+            if a is None:
+                break
+            g.step([a, 4])
+    c = np.argwhere(g.owner == 0)
+    fill = len(c) / ((np.ptp(c[:, 0]) + 1) * (np.ptp(c[:, 1]) + 1))
+    assert len(c) > 300 and fill > 0.9 and g.players[0].alive
+
+
+def test_lag_guard_turns_before_the_last_tile():
+    import splixrl.options as O
+    g = _blank_game()
+    g.owner[10:15, 10:15] = 0
+    me = g.players[0]
+    me.pos, me.heading, me.trail = (2, 12), UP, [(3, 12)]  # two tiles from the top wall, out on a trail
+    g.trail[3, 12] = 0
+    r = O.OptionRunner(0, np.random.default_rng(0))
+    assert r._lag_safe(g, 0, STRAIGHT) != STRAIGHT  # straight would leave no room for a late turn
+    me.pos = (5, 12)
+    assert r._lag_safe(g, 0, STRAIGHT) == STRAIGHT  # plenty of room
+
+
+def test_enclosure_is_detected():
+    import splixrl.options as O
+    g = _blank_game()
+    g.owner[5:30, 5:30] = 1
+    g.owner[14:20, 14:20] = 0
+    enc = O.enclosure(g, 0)
+    assert enc is not None and enc[0] == 1 and enc[1][0, 0] and not enc[1][16, 16]
+    g.owner[14:20, 20:31] = 0  # a corridor out to the open
+    assert O.enclosure(g, 0) is None

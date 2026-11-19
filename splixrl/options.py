@@ -123,10 +123,11 @@ VIEW = 25  # options only look this far (the server's range)
 ORDER = [STRAIGHT, TURN_LEFT, TURN_RIGHT]
 
 
-def _enemy_heads(game: SplixGame, pid: int) -> np.ndarray:
+def _enemy_heads(game: SplixGame, pid: int, exclude=None) -> np.ndarray:
     p = game.players[pid]
     heads = [q.pos for q in game.players
-             if q.alive and q.pid != pid and max(abs(q.pos[0] - p.pos[0]), abs(q.pos[1] - p.pos[1])) <= VIEW]
+             if q.alive and q.pid != pid and getattr(q, "key", q.pid) != exclude
+             and max(abs(q.pos[0] - p.pos[0]), abs(q.pos[1] - p.pos[1])) <= VIEW]
     return np.array(heads, dtype=np.int64).reshape(-1, 2)
 
 
@@ -143,9 +144,39 @@ NO_DOOMED_LOOPS = True
 MIN_LOOP = 4
 # Turn a loop's side leg toward my land so it lies along the edge.
 HUG_EDGE = True
+# If all my land is a hole inside one enemy's land, their next loop anywhere
+# takes all of it (and I die with no land left): cut a strip out to the
+# open first.
+BREAK_OUT = True
+# Turn one tile early when the tile after next is a wall or my own trail: a
+# turn that lands a tile late (lag) then still lands safely. Most deaths in
+# simulation were wall hits from last-tile turns.
+LAG_GUARD = True
+# Attack only races I win: I reach the victim's trail at least RACE_SLACK
+# steps before it gets home and before it could reach my trail. While such a
+# race is on, the victim doesn't count in the safety rule; everyone else does.
+SAFE_ATTACK = True
+RACE_SLACK = 2
+# From my own land, take any winnable race within KILL_REACH, whatever plan I'm on.
+KILL_REFLEX = False  # more kills but almost twice the deaths in testing
+KILL_REACH = 12
+# Expand with strips: when a loop is due, lay a d x L rectangle flush along
+# the straightest stretch of my edge nearby instead (staying within d tiles of
+# my land the whole way), picking the most land per step of the trip.
+STRIPS = True
+# Only see enemy trails on my land that are on screen, as the real client does.
+VIEW_DEFEND = True
+# My tile count dropping with no enemy trail on my land in view means land is
+# being taken where I can't see: walk over my land toward the part out of view.
+LAND_ALARM = False  # off: in testing it patrolled far too often and cost land (sparse return 352 -> 294)
+ALARM_TILES = 5   # tiles lost within ALARM_WINDOW steps
+ALARM_WINDOW = 20
+MAX_STRIP = 24
+MAX_DEPTH = 8
+BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
 
 
-def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
+def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray, exclude=None) -> int | None:
     """Fewest steps any enemy could need to touch ``exposed`` cells.
 
     Visible heads count at their distance. Enemies seen recently but now out of
@@ -153,7 +184,7 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
     tiles closer by now (the observation memory, see obs.memory_planes).
     """
     best = None
-    heads = _enemy_heads(game, pid)
+    heads = _enemy_heads(game, pid, exclude)
     if len(heads):
         best = int(np.abs(exposed[:, None, :] - heads[None, :, :]).sum(2).min())
     mem = (getattr(game, "obs_memory", None) or {}).get(pid)
@@ -163,7 +194,9 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
         # VIEW + 1 - (how far the cell is from my head) steps to reach that cell.
         head = np.array(game.players[pid].pos)
         unseen = np.maximum(0, VIEW + 1 - UNSEEN_MARGIN - np.abs(exposed - head).max(1))
-        for pos, t in mem.get("seen", {}).values():
+        for key, (pos, t) in mem.get("seen", {}).items():
+            if exclude is not None and key == exclude:
+                continue
             age = clock - t
             if 0 < age <= MEMORY_TRUST:
                 guess = np.abs(exposed - np.array(pos)).sum(1) - MEMORY_SPEED * age
@@ -172,12 +205,36 @@ def _enemy_reach(game: SplixGame, pid: int, exposed: np.ndarray) -> int | None:
     return best
 
 
-def escape_margin(game: SplixGame, pid: int) -> float:
+def enclosure(game: SplixGame, pid: int) -> tuple[int, np.ndarray] | None:
+    """(enemy pid, cells outside its closure) if all my land lies inside one
+    enemy's land (a hole in it), else None. Only land I know about counts."""
+    from scipy.ndimage import binary_fill_holes
+
+    own = game.owner == pid
+    if not own.any():
+        return None
+    cells = np.argwhere(own)
+    r, c = cells[0]
+    for q in game.players:
+        if not q.alive or q.pid == pid:
+            continue
+        theirs = (game.owner == q.pid) | (game.trail == q.pid)
+        # quick test first: is my first tile walled in by their land on all four sides?
+        if not (theirs[:r, c].any() and theirs[r + 1:, c].any() and theirs[r, :c].any() and theirs[r, c + 1:].any()):
+            continue
+        closed = binary_fill_holes(theirs)
+        if closed[own].all():
+            return q.pid, ~closed
+    return None
+
+
+def escape_margin(game: SplixGame, pid: int, exclude=None) -> float:
     """(fewest steps an enemy -- visible, or seen recently -- needs to reach my
-    trail or head) - (my distance home)."""
+    trail or head) - (my distance home). ``exclude``: an enemy I'm about to
+    kill, whose race I've already checked."""
     p = game.players[pid]
     exposed = np.array([*p.trail, p.pos], dtype=np.int64).reshape(-1, 2)
-    reach = _enemy_reach(game, pid, exposed)
+    reach = _enemy_reach(game, pid, exposed, exclude)
     if reach is None:
         return 99.0
     own = game.owner == pid
@@ -216,6 +273,10 @@ class OptionRunner:
         self.idle_guard = True  # never stand around on my land with nobody in view (helps against human-like bots, see SUMMARY)
         self.idled_off = False
         self.defended = 0  # steps spent on the defend reflex
+        self.broke_out = False  # switched to breaking out of an enclosure
+        self.base_threshold = self.threshold
+        self.prey = None  # (key, trail cells) of an enemy whose race I'm winning
+        self.alarmed = False  # went to look for land being taken out of view
 
     # -- helpers ----------------------------------------------------------------
     def _near(self, game, pid, radius=2):
@@ -247,6 +308,42 @@ class OptionRunner:
             return self._go_home(game, pid)
         return a
 
+    def _late_turn_fatal(self, game, pid, heading=None, pos=None):
+        """Would going straight one more tile leave no room for a late turn?"""
+        p = game.players[pid]
+        h = p.heading if heading is None else heading
+        r, c = p.pos if pos is None else pos
+        r2, c2 = r + 2 * int(DIRS[h, 0]), c + 2 * int(DIRS[h, 1])
+        if not (0 <= r2 < game.size and 0 <= c2 < game.size):
+            return True
+        return bool(game.trail[r2, c2] == pid)
+
+    def _after(self, game, pid, a):
+        p = game.players[pid]
+        h = p.heading if a == STRAIGHT else (p.heading + (3 if a == TURN_LEFT else 1)) % 4
+        return h, (p.pos[0] + int(DIRS[h, 0]), p.pos[1] + int(DIRS[h, 1]))
+
+    def _lag_safe(self, game, pid, a):
+        """Backstop for every move: don't end up facing a wall or my own trail
+        from right next to it, where the next turn landing late is fatal."""
+        if not LAG_GUARD or a not in (STRAIGHT, TURN_LEFT, TURN_RIGHT):
+            return a
+        h, nxt = self._after(game, pid, a)
+        if not self._late_turn_fatal(game, pid, h, nxt):
+            return a
+        own = np.argwhere(game.owner == pid)
+        best, best_d = a, None
+        for t in (STRAIGHT, TURN_LEFT, TURN_RIGHT):
+            if t == a or not game.is_safe(pid, t):
+                continue
+            h, nxt = self._after(game, pid, t)
+            if self._late_turn_fatal(game, pid, h, nxt):
+                continue
+            d = int(np.abs(own - np.array(nxt)).sum(1).min()) if len(own) else 0
+            if best_d is None or d < best_d:
+                best, best_d = t, d
+        return best
+
     def _step_inside(self, game, pid):
         """One safe step that stays on my land (used when an option has nothing to do)."""
         self.done = True
@@ -258,6 +355,10 @@ class OptionRunner:
 
     # -- main -------------------------------------------------------------------
     def act(self, game: SplixGame, pid: int) -> int | None:
+        a = self._act(game, pid)
+        return a if a is None else self._lag_safe(game, pid, a)
+
+    def _act(self, game: SplixGame, pid: int) -> int | None:
         if self.done:
             return None
         p = game.players[pid]
@@ -274,8 +375,11 @@ class OptionRunner:
             self.done = True
             return None
         self.steps += 1
+        if SAFE_ATTACK and self.kind == "attack":
+            self.prey = self._race(game, pid)
+        prey_key = self.prey[0] if self.prey is not None else None
         if not at_home and (self.steps > MAX_OPTION_STEPS or
-                            (p.trail and escape_margin(game, pid) <= self.threshold)):
+                            (p.trail and escape_margin(game, pid, prey_key) <= self.threshold)):
             if self.phase != "home":
                 self.aborted = True
             return self._go_home(game, pid)
@@ -290,6 +394,25 @@ class OptionRunner:
                     return a
         if self.phase == "home":
             return self._go_home(game, pid)
+        if LAND_ALARM and at_home and self.kind not in ("attack", "break_out", "patrol") and self.phase is None \
+                and self._land_alarm(game, pid):
+            self.kind, self.alarmed = "patrol", True
+        if KILL_REFLEX and SAFE_ATTACK and at_home and self.kind not in ("attack", "break_out"):
+            prey = self._race(game, pid)
+            if prey is not None and int(np.abs(np.argwhere(prey[1]) - np.array(p.pos)).sum(1).min()) <= KILL_REACH:
+                self.kind, self.prey, self.phase, self.steps = "attack", prey, None, 1
+                self.killer = True
+        if BREAK_OUT and at_home and self.phase is None and self.kind != "break_out":
+            enc = enclosure(game, pid)
+            if enc is not None:
+                self.kind, self.target, self.broke_out = "break_out", enc[1], True
+                # all my land is lost at the encloser's next loop anyway: accept
+                # more risk than usual to get out
+                self.threshold = min(self.base_threshold, BREAK_OUT_THRESHOLD)
+        if STRIPS and at_home and self.phase is None and self.kind in ("loop", "open_loop", "safe_loop"):
+            plan = self._plan_strip(game, pid)
+            if plan is not None:
+                self.kind, self.strip = "strip", plan
         if at_home and self.idle_guard and self.kind in ("home", "ambush", "attack") and self.phase is None \
                 and not self._threat_near(game, pid):
             # nothing to wait for or attack: expand instead of idling
@@ -316,9 +439,14 @@ class OptionRunner:
         its owner's way back to their own land."""
         own = game.owner == pid
         invader = (game.trail != EMPTY) & (game.trail != pid) & own
+        p = game.players[pid]
+        if VIEW_DEFEND and invader.any():
+            r, c = p.pos
+            sight = np.zeros_like(invader)
+            sight[max(0, r - VIEW) : r + VIEW + 1, max(0, c - VIEW) : c + VIEW + 1] = True
+            invader &= sight
         if not invader.any():
             return None
-        p = game.players[pid]
         me = np.array(p.pos)
         detour = 0
         if not at_home:
@@ -416,7 +544,7 @@ class OptionRunner:
             self.params = [out, side, turn]
             self.phase, self.left = "out", out - 1
         if self.phase == "out":
-            if self.left > 0:
+            if self.left > 0 and not (LAG_GUARD and self._late_turn_fatal(game, pid)):
                 self.left -= 1
                 return self._checked(game, pid, STRAIGHT)
             self.phase, self.left = "side", side - 1
@@ -424,7 +552,7 @@ class OptionRunner:
                 turn = self._hugging_turn(game, pid, side, turn)
             return self._checked(game, pid, turn)
         if self.phase == "side":
-            if self.left > 0:
+            if self.left > 0 and not (LAG_GUARD and self._late_turn_fatal(game, pid)):
                 self.left -= 1
                 return self._checked(game, pid, STRAIGHT)
         return self._go_home(game, pid)
@@ -468,6 +596,177 @@ class OptionRunner:
         side2 = min(side, max(2, b // 2))
         return min(out, max(2, b - side2)), side2
 
+    def _opt_break_out(self, game, pid, at_home):
+        """Cut a strip through the enclosing land to the open, then go home:
+        the capture joins my land to the outside, so it's no longer a hole."""
+        p = game.players[pid]
+        if at_home and self.phase is None:
+            if self._budget(game, pid) < 1:
+                return self._step_inside(game, pid)  # the encloser is right here: wait for a gap
+            self.phase = "go"
+        if self.phase == "go":
+            if self.target[p.pos]:
+                return self._go_home(game, pid)
+            return self._checked(game, pid, self._route(game, pid, self.target, game.trail == pid))
+        return self._go_home(game, pid)
+
+    def _plan_strip(self, game, pid):
+        """(h, start S, turn, length L, depth d) for the best strip, or None.
+
+        Every straight stretch of my edge in view is a candidate. Score: new
+        land per step of the trip (walk to the start + out + along + back),
+        times how compact my land is afterwards (area / bounding box, squared),
+        so strips that fill notches beat ones that stretch a peninsula."""
+        p = game.players[pid]
+        n = game.size
+        own = game.owner == pid
+        budget = self._budget(game, pid)
+        if budget < MIN_LOOP:
+            return None
+        d_cap = int(np.clip(budget // 2, 2, MAX_DEPTH))
+        me = np.array(p.pos)
+        r0, r1 = max(0, me[0] - VIEW), min(n, me[0] + VIEW + 1)
+        c0, c1 = max(0, me[1] - VIEW), min(n, me[1] + VIEW + 1)
+        local = own[r0:r1, c0:c1]
+        if not local.any():
+            return None
+        lc = np.argwhere(local) + np.array([r0, c0])
+        area0 = len(lc)
+        lo0, hi0 = lc.min(0), lc.max(0)
+        rr, cc = np.mgrid[0:n, 0:n]
+        window = np.zeros_like(own)
+        window[r0:r1, c0:c1] = True
+        busy = game.trail != EMPTY
+        for q in game.players:
+            if q.alive and q.pid != pid:
+                busy[q.pos] = True
+        best, best_score = None, 0.0
+        for h in range(4):
+            dr, dc = int(DIRS[h, 0]), int(DIRS[h, 1])
+            nb_in = (rr + dr >= 0) & (rr + dr < n) & (cc + dc >= 0) & (cc + dc < n)
+            nb_own = np.roll(own, (-dr, -dc), axis=(0, 1)) & nb_in  # own[r + dr, c + dc]
+            frontier = own & nb_in & ~nb_own & window
+            if not frontier.any():
+                continue
+            axis = 1 if dr != 0 else 0  # position along the edge: column for vertical h, row otherwise
+            cells = np.argwhere(frontier)
+            for fixed in np.unique(cells[:, 1 - axis]):
+                along = np.sort(cells[cells[:, 1 - axis] == fixed][:, axis])
+                runs, start = [], along[0]
+                for a, b in zip(along[:-1], along[1:]):
+                    if b != a + 1:
+                        runs.append((start, a)); start = b
+                runs.append((start, along[-1]))
+                for lo, hi in runs:
+                    L = int(hi - lo + 1)
+                    if L < 3:
+                        continue
+                    near_lo = abs(int(lo) - int(me[axis])) <= abs(int(hi) - int(me[axis]))
+                    cap = int(np.clip(budget - 2, 3, MAX_STRIP))
+                    if L > cap:
+                        lo, hi = (lo, lo + cap - 1) if near_lo else (hi - cap + 1, hi)
+                        L = cap
+                    s_along, step = (int(lo), 1) if near_lo else (int(hi), -1)
+                    S = (int(fixed), s_along) if axis == 1 else (s_along, int(fixed))
+                    pdir = (0, step) if axis == 1 else (step, 0)
+                    d = 0
+                    for k in range(1, d_cap + 1):
+                        band = [(S[0] + k * dr + j * pdir[0], S[1] + k * dc + j * pdir[1]) for j in range(L)]
+                        # one tile off the wall, so the far turn can land late
+                        if not all(1 <= x < n - 1 and 1 <= y < n - 1 for x, y in band) or any(busy[x, y] for x, y in band):
+                            break
+                        d = k
+                    if d < 2:
+                        continue
+                    far = (S[0] + d * dr + (L - 1) * pdir[0], S[1] + d * dc + (L - 1) * pdir[1])
+                    lo1 = np.minimum(np.minimum(lo0, S), far)
+                    hi1 = np.maximum(np.maximum(hi0, S), far)
+                    corners = np.array([S, far])
+                    band_lo, band_hi = corners.min(0), corners.max(0)
+                    gained = L * d - int(np.count_nonzero(own[band_lo[0] : band_hi[0] + 1, band_lo[1] : band_hi[1] + 1]))
+                    if gained < 4:
+                        continue
+                    fill = (area0 + gained) / float(np.prod(hi1 - lo1 + 1))
+                    walk = int(np.abs(np.array(S) - me).sum())
+                    score = gained / (L + 2 * d + walk) * fill * fill
+                    if score > best_score:
+                        ph = [i for i in range(4) if (int(DIRS[i, 0]), int(DIRS[i, 1])) == pdir][0]
+                        turn = TURN_RIGHT if ph == (h + 1) % 4 else TURN_LEFT
+                        best, best_score = (h, S, turn, L, d), score
+        return best
+
+    def _opt_strip(self, game, pid, at_home):
+        h, S, turn, L, d = self.strip
+        p = game.players[pid]
+        if at_home:
+            if self.phase not in (None, "to_start"):
+                return self._go_home(game, pid)
+            self.phase = "to_start"
+            T = (S[0] + int(DIRS[h, 0]), S[1] + int(DIRS[h, 1]))
+            goal = np.zeros_like(game.owner, dtype=bool)
+            goal[T] = True
+            blocked = game.owner != pid
+            for side in ((h + 1) % 4, (h + 3) % 4):  # step out from S itself, facing h
+                x, y = T[0] + int(DIRS[side, 0]), T[1] + int(DIRS[side, 1])
+                if 0 <= x < game.size and 0 <= y < game.size:
+                    blocked[x, y] = True
+            blocked[T] = False
+            blocked |= game.trail == pid
+            a = bfs_first_action(game, pid, goal, blocked, ORDER)
+            if a is None or self.steps > 45:  # can't get there: an ordinary loop instead
+                self.kind = "open_loop"
+                return self._opt_open_loop(game, pid, at_home)
+            return self._checked(game, pid, a)
+        if self.phase == "to_start":  # first tile out
+            self.phase, self.left = "out", d - 1
+        if self.phase == "out":
+            if self.left > 0 and not (LAG_GUARD and self._late_turn_fatal(game, pid)):
+                self.left -= 1
+                return self._checked(game, pid, STRAIGHT)
+            self.phase, self.left = "side", L - 2  # the corner tile and the turn's own tile are the first two
+            return self._checked(game, pid, turn)
+        if self.phase == "side":
+            if self.left > 0 and not (LAG_GUARD and self._late_turn_fatal(game, pid)):
+                self.left -= 1
+                return self._checked(game, pid, STRAIGHT)
+        return self._go_home(game, pid)
+
+    def _land_alarm(self, game, pid) -> bool:
+        """Has my tile count dropped lately with nothing in view to explain it?"""
+        count = getattr(game, "land_count", None)
+        if count is None:
+            count = int(np.count_nonzero(game.owner == pid))
+        store = getattr(game, "obs_memory", None)
+        if store is None:
+            store = game.obs_memory = {}
+        mem = store.setdefault(pid, {"seen": {}, "maps": []})
+        hist = mem.setdefault("land", [])
+        clock = int(getattr(game, "clock", game.t))
+        if not hist or hist[-1][0] != clock:
+            hist.append((clock, count))
+        del hist[: max(0, len(hist) - ALARM_WINDOW)]
+        if len(hist) < 2 or max(c for _, c in hist) - count < ALARM_TILES:
+            return False
+        if self._invasion(game, pid, True) is not None or len(_enemy_heads(game, pid)):
+            return False  # the taker is in view: the defend reflex and the safety rule have it
+        return True
+
+    def _opt_patrol(self, game, pid, at_home):
+        """Walk over my land toward the part I can't see, where it's being taken."""
+        p = game.players[pid]
+        if not at_home or self.steps > 30:
+            return self._go_home(game, pid) if not at_home else self._step_inside(game, pid)
+        own = game.owner == pid
+        r, c = p.pos
+        far = own.copy()
+        far[max(0, r - VIEW + 3) : r + VIEW - 2, max(0, c - VIEW + 3) : c + VIEW - 2] = False
+        if not far.any():
+            return self._step_inside(game, pid)
+        a = bfs_first_action(game, pid, far, ~own | (game.trail == pid), ORDER)
+        if a is None or not game.is_safe(pid, a):
+            return self._step_inside(game, pid)
+        return a
+
     def _opt_home(self, game, pid, at_home):
         return self._step_inside(game, pid) if at_home else self._go_home(game, pid)
 
@@ -496,8 +795,36 @@ class OptionRunner:
             return self._checked(game, pid, self._route(game, pid, self.target, game.trail == pid))
         return self._go_home(game, pid)
 
+    def _race(self, game, pid):
+        """The closest enemy trail I can cut first, as (key, cells), or None."""
+        p = game.players[pid]
+        me = np.array(p.pos)
+        mine = np.array([*p.trail, p.pos], dtype=np.int64).reshape(-1, 2)
+        best, best_d = None, None
+        for q in game.players:
+            if not q.alive or q.pid == pid or max(abs(q.pos[0] - p.pos[0]), abs(q.pos[1] - p.pos[1])) > VIEW:
+                continue
+            theirs = np.argwhere(game.trail == q.pid)
+            if not len(theirs):
+                continue
+            my_d = int(np.abs(theirs - me).sum(1).min())
+            land = np.argwhere(game.owner == q.pid)
+            home = int(np.abs(land - np.array(q.pos)).sum(1).min()) if len(land) else 99
+            hit = int(np.abs(mine - np.array(q.pos)).sum(1).min())
+            if my_d > VIEW or my_d + RACE_SLACK > min(home, hit):
+                continue
+            if best_d is None or my_d < best_d:
+                best, best_d = (getattr(q, "key", q.pid), game.trail == q.pid), my_d
+        return best
+
     def _opt_attack(self, game, pid, at_home):
         p = game.players[pid]
+        if SAFE_ATTACK:
+            if self.prey is not None and self.steps <= 40:
+                a = bfs_first_action(game, pid, self.prey[1], game.trail == pid, ORDER)
+                if a is not None and game.is_safe(pid, a):
+                    return a
+            return self._step_inside(game, pid) if at_home else self._go_home(game, pid)
         enemy_trail = (game.trail != EMPTY) & (game.trail != pid)
         if enemy_trail.any() and self.steps <= 40:
             cells = np.argwhere(enemy_trail)

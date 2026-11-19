@@ -245,6 +245,7 @@ class LiveState:
         g.obs_memory = self.obs_memory  # memory channels persist across per-tile snapshots
         g.clock = steps
         g.lag_estimate = self.lag_estimate
+        g.land_count = self.score_tiles  # the server's count of my tiles, including ones out of view
 
         def to_rc(x, y):
             return y - 1, x - 1
