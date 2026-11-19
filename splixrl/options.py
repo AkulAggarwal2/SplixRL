@@ -167,10 +167,14 @@ STRIPS = True
 # Only see enemy trails on my land that are on screen, as the real client does.
 VIEW_DEFEND = True
 # My tile count dropping with no enemy trail on my land in view means land is
-# being taken where I can't see: walk over my land toward the part out of view.
-LAND_ALARM = False  # off: in testing it patrolled far too often and cost land (sparse return 352 -> 294)
+# being taken where I can't see: walk over my land to where it likely is --
+# border other land has grown toward lately (minimap), else border other land
+# touches, else my land out of view. At most one patrol per ALARM_COOLDOWN steps.
+LAND_ALARM = True
 ALARM_TILES = 5   # tiles lost within ALARM_WINDOW steps
 ALARM_WINDOW = 20
+ALARM_COOLDOWN = 60  # steps between patrols
+GROWTH_AGE = 30  # "approaching": other land that appeared within this many steps
 MAX_STRIP = 24
 MAX_DEPTH = 8
 BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
@@ -277,6 +281,8 @@ class OptionRunner:
         self.base_threshold = self.threshold
         self.prey = None  # (key, trail cells) of an enemy whose race I'm winning
         self.alarmed = False  # went to look for land being taken out of view
+        self.target = None
+        self.patrol_kind = None
 
     # -- helpers ----------------------------------------------------------------
     def _near(self, game, pid, radius=2):
@@ -745,24 +751,60 @@ class OptionRunner:
         if not hist or hist[-1][0] != clock:
             hist.append((clock, count))
         del hist[: max(0, len(hist) - ALARM_WINDOW)]
+        if clock % 10 == 0:
+            self._other_land(game, pid)  # keep the growth snapshots current
         if len(hist) < 2 or max(c for _, c in hist) - count < ALARM_TILES:
             return False
         if self._invasion(game, pid, True) is not None or len(_enemy_heads(game, pid)):
             return False  # the taker is in view: the defend reflex and the safety rule have it
+        if clock - mem.get("patrol_t", -10**9) < ALARM_COOLDOWN:
+            return False
+        mem["patrol_t"] = clock
         return True
 
+    def _other_land(self, game, pid):
+        """Land that isn't mine, as far as I know it: what I've seen, plus the
+        minimap (which shows land but not whose). Snapshots kept for growth."""
+        own = game.owner == pid
+        land = game.owner != EMPTY
+        hint = getattr(game, "land_hint", None)
+        if hint is not None and hint.shape == land.shape:
+            land = land | hint
+        other = land & ~own
+        mem = game.obs_memory.setdefault(pid, {"seen": {}, "maps": []})
+        snaps = mem.setdefault("other", [])
+        clock = int(getattr(game, "clock", game.t))
+        if not snaps or clock - snaps[-1][0] >= 10:
+            snaps.append((clock, other.copy()))
+        while len(snaps) > 1 and clock - snaps[1][0] >= GROWTH_AGE:
+            snaps.pop(0)
+        old = snaps[0][1] if snaps[0][1].shape == other.shape else other
+        return other, other & ~old
+
     def _opt_patrol(self, game, pid, at_home):
-        """Walk over my land toward the part I can't see, where it's being taken."""
+        """Walk over my land to where it's likely being taken, out of view:
+        border where other land has grown toward me lately, else border that
+        other land touches, else just my land out of view."""
+        from scipy.ndimage import binary_dilation
+
         p = game.players[pid]
         if not at_home or self.steps > 30:
             return self._go_home(game, pid) if not at_home else self._step_inside(game, pid)
         own = game.owner == pid
         r, c = p.pos
-        far = own.copy()
-        far[max(0, r - VIEW + 3) : r + VIEW - 2, max(0, c - VIEW + 3) : c + VIEW - 2] = False
-        if not far.any():
+        out_of_view = np.ones_like(own)
+        out_of_view[max(0, r - VIEW + 3) : r + VIEW - 2, max(0, c - VIEW + 3) : c + VIEW - 2] = False
+        if self.target is None:
+            other, grown = self._other_land(game, pid)
+            far = own & out_of_view
+            approaching = far & binary_dilation(grown, iterations=3)
+            touching = far & binary_dilation(other, iterations=1)
+            self.target = next((m for m in (approaching, touching, far) if m.any()), None)
+            self.patrol_kind = ("approaching" if approaching.any() else "touching" if touching.any() else "inside") \
+                if self.target is not None else None
+        if self.target is None or self.target[p.pos]:
             return self._step_inside(game, pid)
-        a = bfs_first_action(game, pid, far, ~own | (game.trail == pid), ORDER)
+        a = bfs_first_action(game, pid, self.target, ~own | (game.trail == pid), ORDER)
         if a is None or not game.is_safe(pid, a):
             return self._step_inside(game, pid)
         return a
