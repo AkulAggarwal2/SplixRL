@@ -35,9 +35,10 @@ import numpy as np
 
 from .evaluation import make_actor
 from .game import DOWN, EMPTY, LEFT, PAUSE, RIGHT, STRAIGHT, UP, Player, SplixGame, turn
-from .obs import build_obs
+from .obs import SERVER_VIEW, build_obs
 
 TILE_SEC = 1 / 0.006 / 1000  # seconds per tile (PLAYER_TRAVEL_SPEED in the server config)
+STALE_SEC = 10.0  # forget another player's position after this long without an update from the server
 
 # server direction ids: 0 right, 1 down, 2 left, 3 up, 4 paused
 SERVER_TO_HEADING = {0: RIGHT, 1: DOWN, 2: LEFT, 3: UP}
@@ -274,6 +275,13 @@ class LiveState:
             x, y = p.pos_at(now)
             pr, pc = to_rc(x, y)
             if not inside(pr, pc):
+                continue
+            # The server only reports players within SERVER_VIEW tiles. Anyone
+            # guessed to be farther away is unknown: leave them to the agent's
+            # memory of where enemies were last seen, instead of a ghost
+            # drifting past my land. A paused player not heard from in
+            # STALE_SEC is likely gone too (they reappear on their next move).
+            if max(abs(pr - r), abs(pc - c)) > SERVER_VIEW or (p.dir == 4 and now - p.t > STALE_SEC):
                 continue
             q = Player(pid=len(g.players), pos=(pr, pc), heading=SERVER_TO_HEADING.get(p.dir, UP))
             q.key = ("server", p.pid)  # stable across snapshots, for the memory channels

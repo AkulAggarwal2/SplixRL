@@ -177,6 +177,7 @@ ALARM_COOLDOWN = 60  # steps between patrols
 GROWTH_AGE = 30  # "approaching": other land that appeared within this many steps
 MAX_STRIP = 24
 MAX_DEPTH = 8
+STRIP_WALK_WEIGHT = 1.0  # how much a step walking over my land to the strip's start counts against it
 BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
 
 
@@ -694,7 +695,7 @@ class OptionRunner:
                         continue
                     fill = (area0 + gained) / float(np.prod(hi1 - lo1 + 1))
                     walk = int(np.abs(np.array(S) - me).sum())
-                    score = gained / (L + 2 * d + walk) * fill * fill
+                    score = gained / (L + 2 * d + STRIP_WALK_WEIGHT * walk) * fill * fill
                     if score > best_score:
                         ph = [i for i in range(4) if (int(DIRS[i, 0]), int(DIRS[i, 1])) == pdir][0]
                         turn = TURN_RIGHT if ph == (h + 1) % 4 else TURN_LEFT

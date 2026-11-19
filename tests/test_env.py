@@ -941,3 +941,21 @@ def test_round0_settings_build_the_reported_env():
     assert obs["grid"].shape == (6, 15, 15) and obs["vec"].shape == (11,)
     assert env.reward_config.death_per_cell == 0.1 and env.reward_config.lost_per_cell == 0.1  # reward v2
     assert env.game.size == 20 and ROUND0["steps"] == 200_000
+
+
+def test_live_snapshot_drops_players_it_cannot_know_about():
+    from splixrl.live import STALE_SEC, LivePlayer, LiveState
+
+    st = LiveState()
+    st.map_size = 102
+    st.tiles = np.ones((102, 102), np.int16)
+    st.my_color = 5
+    st.tiles[45:56, 45:56] = 5
+    now = 100.0
+    st.players[0] = LivePlayer(0, 50, 50, 4, now)
+    st.players[1] = LivePlayer(1, 60, 50, 4, now)  # 10 tiles away, paused just now: real
+    st.players[2] = LivePlayer(2, 90, 50, 4, now)  # 40 tiles away: the server wouldn't tell us
+    st.players[3] = LivePlayer(3, 50, 62, 4, now - STALE_SEC - 20)  # paused, not heard from in 30 s
+    st.players[4] = LivePlayer(4, 50, 40, 1, now - 30)  # moving, last seen 30 s ago: long gone
+    g = st.snapshot((50, 50), 0, now, steps=10, max_steps=1000)
+    assert [q.key for q in g.players[1:]] == [("server", 1)]
