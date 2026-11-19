@@ -181,6 +181,9 @@ GROWTH_AGE = 30  # "approaching": other land that appeared within this many step
 MAX_STRIP = 24
 MAX_DEPTH = 8
 STRIP_SKIP_HOLES = True  # no strips into holes in my land (enclosed enemy land is for the cut)
+SAFE_STRIPS = False  # tested: strips got too small, more trips and more deaths. Was: a strip's whole trail must fit in the safety budget (it used to be the size, so the trail could be out twice as long)
+STRIP_EXPOSURE_WEIGHT = 0.5  # a step with my trail out costs this much more than a step walking on my land
+STRIP_USE_CORNERS = True  # start a strip from the end that lets it finish by running into my land
 STRIP_WINDOW = 25  # strips may start this far away (50 tested: no better, more deaths)
 STRIP_MAX_WALK = 50
 STRIP_WALK_WEIGHT = 1.0  # how much a step walking over my land to the strip's start counts against it
@@ -748,37 +751,58 @@ class OptionRunner:
                     if L > cap:
                         lo, hi = (lo, lo + cap - 1) if near_lo else (hi - cap + 1, hi)
                         L = cap
-                    s_along, step = (int(lo), 1) if near_lo else (int(hi), -1)
-                    S = (int(fixed), s_along) if axis == 1 else (s_along, int(fixed))
-                    pdir = (0, step) if axis == 1 else (step, 0)
+                    # depth: the band is the same rectangle whichever end the trip starts from
+                    S_lo = (int(fixed), int(lo)) if axis == 1 else (int(lo), int(fixed))
+                    p_lo = (0, 1) if axis == 1 else (1, 0)
                     d = 0
                     for k in range(1, d_cap + 1):
-                        band = [(S[0] + k * dr + j * pdir[0], S[1] + k * dc + j * pdir[1]) for j in range(L)]
+                        band = [(S_lo[0] + k * dr + j * p_lo[0], S_lo[1] + k * dc + j * p_lo[1]) for j in range(L)]
                         # one tile off the wall, so the far turn can land late
                         if not all(1 <= x < n - 1 and 1 <= y < n - 1 for x, y in band) or any(busy[x, y] for x, y in band):
                             break
                         d = k
                     if d < 2:
                         continue
-                    if inside is not None and inside[S[0] + dr, S[1] + dc]:
+                    if inside is not None and inside[S_lo[0] + dr, S_lo[1] + dc]:
                         continue  # this edge faces a hole in my land
-                    far = (S[0] + d * dr + (L - 1) * pdir[0], S[1] + d * dc + (L - 1) * pdir[1])
-                    lo1 = np.minimum(np.minimum(lo0, S), far)
-                    hi1 = np.maximum(np.maximum(hi0, S), far)
-                    corners = np.array([S, far])
+                    far_lo = (S_lo[0] + d * dr + (L - 1) * p_lo[0], S_lo[1] + d * dc + (L - 1) * p_lo[1])
+                    lo1 = np.minimum(np.minimum(lo0, S_lo), far_lo)
+                    hi1 = np.maximum(np.maximum(hi0, S_lo), far_lo)
+                    corners = np.array([S_lo, far_lo])
                     band_lo, band_hi = corners.min(0), corners.max(0)
                     gained = L * d - int(np.count_nonzero(own[band_lo[0] : band_hi[0] + 1, band_lo[1] : band_hi[1] + 1]))
                     if gained < 4:
                         continue
                     fill = (area0 + gained) / float(np.prod(hi1 - lo1 + 1))
-                    walk = int(np.abs(np.array(S) - me).sum())
-                    if walk > STRIP_MAX_WALK:
-                        continue
-                    score = gained / (L + 2 * d + STRIP_WALK_WEIGHT * walk) * fill * fill
-                    if score > best_score:
+                    # Start from either end. If my land already borders the far end of the
+                    # band, the trip ends by running into it: no trail back along that side
+                    # (out of a corner, a player goes along the open side, not beside their land).
+                    for s_along, step in ((int(lo), 1), (int(hi), -1)):
+                        S = (int(fixed), s_along) if axis == 1 else (s_along, int(fixed))
+                        pdir = (0, step) if axis == 1 else (step, 0)
                         ph = [i for i in range(4) if (int(DIRS[i, 0]), int(DIRS[i, 1])) == pdir][0]
-                        turn = TURN_RIGHT if ph == (h + 1) % 4 else TURN_LEFT
-                        best, best_score = (h, S, turn, L, d), score
+                        beyond = [(S[0] + k * dr + L * pdir[0], S[1] + k * dc + L * pdir[1]) for k in range(1, d + 1)]
+                        closes = STRIP_USE_CORNERS and all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in beyond)
+                        options = [(h, S, ph, L, d, d + L + (0 if closes else d))]
+                        if STRIP_USE_CORNERS:
+                            # out of a corner: if my land borders the start side of the band, leave
+                            # from that land at the band's far edge and run along it (two sides of
+                            # trail instead of three)
+                            side = [(S[0] + k * dr - pdir[0], S[1] + k * dc - pdir[1]) for k in range(1, d + 1)]
+                            if all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in side):
+                                S2 = side[-1]
+                                back = (h + 2) % 4
+                                options.append((ph, S2, back, d + 1, L, L + d))
+                        for h1, S1, turn_to, side_len, out_len, trail in options:
+                            if SAFE_STRIPS and trail > budget:
+                                continue  # the trail would be out longer than an enemy needs to get here
+                            walk = int(np.abs(np.array(S1) - me).sum())
+                            if walk > STRIP_MAX_WALK:
+                                continue
+                            score = gained / (trail * (1 + STRIP_EXPOSURE_WEIGHT) + STRIP_WALK_WEIGHT * walk) * fill * fill
+                            if score > best_score:
+                                turn = TURN_RIGHT if turn_to == (h1 + 1) % 4 else TURN_LEFT
+                                best, best_score = (h1, S1, turn, side_len, out_len), score
         return best
 
     def _opt_strip(self, game, pid, at_home):
