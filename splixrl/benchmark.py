@@ -65,7 +65,10 @@ def _games(job):
             ret += r
             if info["captured"]:
                 caps.append(info["captured"])
+        mine = np.argwhere(env.game.owner == 0)
+        shape = len(mine) / float(np.prod(mine.max(0) - mine.min(0) + 1)) if len(mine) else 0.0
         rows.append({
+            "shape": shape,
             "return": ret, "survived": not te, "death": info.get("death_cause") if te else None,
             "kills": info["kills"], "peak": info["peak_territory"], "land": info["territory"],
             "captures": caps,
@@ -102,7 +105,8 @@ def main(argv=None):
     print(f"{args.size}x{args.size}, {args.opponents} opponents, {n} games of {args.steps} steps ({label}):")
     print(f"  return {np.mean([r['return'] for r in rows]):.1f} | survived {np.mean([r['survived'] for r in rows]):.0%} "
           f"| kills {np.mean([r['kills'] for r in rows]):.1f} | peak land {np.mean([r['peak'] for r in rows]):.0f} "
-          f"| land at the end {np.mean([r['land'] for r in rows]):.0f} | median capture {np.median(caps):.0f}")
+          f"| land at the end {np.mean([r['land'] for r in rows]):.0f} | median capture {np.median(caps):.0f} "
+          f"| shape (land / bounding box) {np.mean([r['shape'] for r in rows if r['land']] or [0]):.2f}")
     print(f"  deaths: {dict(deaths) or 'none'}")
 
 

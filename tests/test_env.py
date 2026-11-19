@@ -959,3 +959,20 @@ def test_live_snapshot_drops_players_it_cannot_know_about():
     st.players[4] = LivePlayer(4, 50, 40, 1, now - 30)  # moving, last seen 30 s ago: long gone
     g = st.snapshot((50, 50), 0, now, steps=10, max_steps=1000)
     assert [q.key for q in g.players[1:]] == [("server", 1)]
+
+
+
+def test_dent_lines_avoid_land_whose_owner_is_off_screen():
+    """The live death: a dent line through someone's land while they weren't on screen."""
+    import splixrl.options as O
+    g = _blank_game(120)
+    g.owner[20:46, 20:31] = 0
+    g.owner[20:46, 40:60] = 0
+    g.owner[40:46, 20:60] = 0  # a U, open at the top
+    g.owner[20:26, 31:40] = 1  # their land in its mouth
+    g.players[1].pos = (100, 100)  # its owner, far off screen
+    g.owner[98:102, 98:102] = 1
+    g.players[0].pos, g.players[0].heading = (30, 45), LEFT
+    plan = O.OptionRunner(0, np.random.default_rng(0))._plan_close(g, 0)
+    assert plan is not None  # it still closes the dent...
+    assert not any(g.owner[c] == 1 for c in plan[3])  # ...but not through their land

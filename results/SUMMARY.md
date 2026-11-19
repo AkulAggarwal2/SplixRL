@@ -276,3 +276,7 @@ Deaths, traced (first 20 games, 6 deaths): 5 were trail cuts while heading home 
 | assume an enemy 30 tiles away when none is known (`UNSEEN_REACH=30`, first 20 only) | 6 of 20 | 4,854 |
 
 `SAFE_STRIPS` is a wash at real scale (within noise, about 4% less land; normal mix 100% survival either way, 7,330 vs 7,618 land) and clearly worse on small crowded maps, so it's off by default. `UNSEEN_REACH` makes it timid without making it safer. The live client takes `--set NAME=value` (e.g. `--set SAFE_STRIPS=1`) to try either version against people.
+
+**First `--explain` log against people** (17 minutes, 7,718 tiles, 4 kills, then killed). The fatal plan: `cut across 9, takes 367 ... nearest known enemy 21 tiles, on screen 0`, a dent line through another player's land while that player wasn't on screen; they cut it from inside their own land. Fixes:
+* `CLOSE_GUARD_ENEMY_LAND`: a dent line may cross someone's land only if its owner is on screen and needs longer to reach the line than the agent needs to cross it. With the owner off screen, at most 2 of their tiles. On a rebuilt case it then closes the same dent just below their land instead of through it (test in `tests/test_env.py`).
+* `FAILED_LINE_MEMORY`: the log showed the same "takes ~800" dent line planned 7 times in a row without the capture happening (stale picture of far land, or someone standing inside the region, which the server protects). A line that takes under 30% of what was planned isn't retried for 300 steps.

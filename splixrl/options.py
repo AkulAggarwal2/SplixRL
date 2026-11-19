@@ -139,6 +139,11 @@ MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many til
 BUDGET_SHARE = 0.8
 IDLE_BUDGET = 12  # expand instead of waiting at home when a strip this big fits (None: only with nobody on screen)
 UNSEEN_REACH = None  # with no enemy known, assume one this many tiles away (None: no limit)
+BELIEF_STALE = False  # when the tile count shows land gone out of view, stop trusting land not seen lately
+STALE_STEPS = 60
+STALE_NEAR_GROWTH = True  # first suspect my unseen land next to fresh land on the minimap
+UNKNOWN_OWNER = 126  # land I once owned but can't vouch for: treated like someone else's
+CLIENT_VIEW = True  # in simulation, options agents plan from what a real client would know
 LAG_CAP = 0.1  # the most lag the safety cushion accounts for (training and tests used 0 - 0.1)
 # Unseen enemies are assumed to be at least this many tiles inside the edge of my view (lag, and the server's view is not exactly square).
 UNSEEN_MARGIN = 5
@@ -182,8 +187,10 @@ GROWTH_AGE = 30  # "approaching": other land that appeared within this many step
 MAX_STRIP = 24
 MAX_DEPTH = 8
 STRIP_SKIP_HOLES = True  # no strips into holes in my land (enclosed enemy land is for the cut)
+GLOBAL_FILL = True  # strips prefer keeping my WHOLE territory compact (area / bounding box), not just the part in view
 SAFE_STRIPS = False  # tested: strips got too small, more trips and more deaths. Was: a strip's whole trail must fit in the safety budget (it used to be the size, so the trail could be out twice as long)
 STRIP_EXPOSURE_WEIGHT = 0.5  # a step with my trail out costs this much more than a step walking on my land
+CORNER_GAP = 3  # a corner start may bridge this many tiles between the strip and my land
 STRIP_USE_CORNERS = True  # start a strip from the end that lets it finish by running into my land
 STRIP_WINDOW = 25  # strips may start this far away (50 tested: no better, more deaths)
 STRIP_MAX_WALK = 50
@@ -201,6 +208,9 @@ MAX_CLOSE = 30  # longest line across a dent
 # would capture is worked out over CLOSE_WINDOW tiles each way, from my
 # remembered land and the minimap, so a dent bigger than the screen counts whole.
 CLOSE_WINDOW = 60
+FAILED_LINE_MEMORY = True  # a line that took far less than planned isn't retried for a while
+FAILED_LINE_COOLDOWN = 300
+CLOSE_GUARD_ENEMY_LAND = True  # a dent line may cross someone's land only if its owner is on screen and loses the race
 CLOSE_BUDGET_FACTOR = 1.0  # a line may be this many safety budgets long
 CUT_SLACK = 1  # the owner must need more than (tiles left to cross + this) steps to reach my line
 BREAK_OUT_THRESHOLD = 2.0  # escape cushion while breaking out (normal: safety + lag slack)
@@ -714,6 +724,8 @@ class OptionRunner:
         if not local.any():
             return None
         lc = np.argwhere(local) + np.array([r0, c0])
+        if GLOBAL_FILL:
+            lc = np.argwhere(own)  # judge compactness on my whole territory, not just around me
         area0 = len(lc)
         inside = None
         if STRIP_SKIP_HOLES:
@@ -790,14 +802,18 @@ class OptionRunner:
                         closes = STRIP_USE_CORNERS and all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in beyond)
                         options = [(h, S, ph, L, d, d + L + (0 if closes else d))]
                         if STRIP_USE_CORNERS:
-                            # out of a corner: if my land borders the start side of the band, leave
-                            # from that land at the band's far edge and run along it (two sides of
-                            # trail instead of three)
-                            side = [(S[0] + k * dr - pdir[0], S[1] + k * dc - pdir[1]) for k in range(1, d + 1)]
-                            if all(0 <= x < n and 0 <= y < n and own[x, y] for x, y in side):
-                                S2 = side[-1]
-                                back = (h + 2) % 4
-                                options.append((ph, S2, back, d + 1, L, L + d))
+                            # out of a corner: if my land runs alongside the start side of the band
+                            # (touching it, or up to CORNER_GAP tiles away -- the gap gets taken
+                            # too), leave from that land at the band's far edge and run along it:
+                            # two sides of trail instead of three
+                            for g in range(0, CORNER_GAP + 1):
+                                side = [(S[0] + k * dr - (g + 1) * pdir[0], S[1] + k * dc - (g + 1) * pdir[1]) for k in range(1, d + 1)]
+                                gap = [(S[0] + k * dr - j * pdir[0], S[1] + k * dc - j * pdir[1]) for k in range(1, d + 1) for j in range(1, g + 1)]
+                                if not all(0 <= x < n and 0 <= y < n for x, y in side + gap) or any(busy[x, y] for x, y in gap):
+                                    break
+                                if all(own[x, y] for x, y in side):
+                                    options.append((ph, side[-1], (h + 2) % 4, d + 1, L + g, L + g + d))
+                                    break
                         for h1, S1, turn_to, side_len, out_len, trail in options:
                             if SAFE_STRIPS and trail > budget:
                                 continue  # the trail would be out longer than an enemy needs to get here
@@ -970,6 +986,8 @@ class OptionRunner:
                     cells = [(k, j) if axis == 0 else (j, k) for j in range(a + 1, b)]
                     if any(busy[c] for c in cells):
                         continue
+                    if CLOSE_GUARD_ENEMY_LAND and not self._may_cross(game, pid, [(x + r0, y + c0) for x, y in cells]):
+                        continue
                     mask = own.copy()
                     for c in cells:
                         mask[c] = True
@@ -991,6 +1009,11 @@ class OptionRunner:
                     other = ends[1] if start == ends[0] else ends[0]
                     walk = int(abs(start[0] - me[0]) + abs(start[1] - me[1]))
                     rate = gain / (gap + 1 + walk)
+                    if rate > best_rate and FAILED_LINE_MEMORY:
+                        h_try = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1])))
+                                 == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
+                        if _bad_line(game, pid, start, h_try):
+                            continue
                     if rate > best_rate:
                         h = [i for i in range(4) if (int(np.sign(other[0] - start[0])), int(np.sign(other[1] - start[1])))
                              == (int(DIRS[i, 0]), int(DIRS[i, 1]))][0]
@@ -1000,6 +1023,28 @@ class OptionRunner:
                         best, best_rate = (start, h, gain, line, None), rate
         return best
 
+    def _may_cross(self, game, pid, cells) -> bool:
+        """Can a line over these cells be crossed safely, given whose land it runs over?
+        On their own land an owner can cut my trail at no risk: only when that owner
+        is on screen and needs longer to reach the line than I need to cross it.
+        Owners I can't see: at most 2 of their tiles."""
+        owners = {int(game.owner[c]) for c in cells} - {EMPTY, pid}
+        if not owners:
+            return True
+        line = np.array(cells, dtype=np.int64)
+        me = game.players[pid].pos
+        for o in owners:
+            q = game.players[o] if 0 <= o < len(game.players) else None
+            if q is None or not q.alive or max(abs(q.pos[0] - me[0]), abs(q.pos[1] - me[1])) > VIEW:
+                # not on screen (or not a player I know): I can't tell where they are
+                if sum(1 for c in cells if game.owner[c] == o) > 2:
+                    return False
+                continue
+            d = int(np.abs(line - np.array(q.pos)).sum(1).min())
+            if d <= len(cells) + 1 + CUT_SLACK:
+                return False
+        return True
+
     def _plan_cut(self, game, pid):
         from .opponents.bots import plan_cut
 
@@ -1008,7 +1053,7 @@ class OptionRunner:
             return d > len(line) + 1 + CUT_SLACK
 
         plan = plan_cut(game, pid, reach=VIEW, ok=winnable)
-        if plan is None:
+        if plan is None or (FAILED_LINE_MEMORY and _bad_line(game, pid, plan[0], plan[1])):
             return None
         start, h, gain, line, owner_pid = plan
         q = game.players[owner_pid]
@@ -1192,6 +1237,83 @@ class OptionsEnv(gym.Wrapper):
         return obs, total, term, trunc, info
 
 
+def _land_count(game: SplixGame, pid: int) -> int:
+    c = getattr(game, "land_count", None)
+    return int(c) if c is not None else int(np.count_nonzero(game.owner == pid))
+
+
+def _bad_line(game: SplixGame, pid: int, start, h) -> bool:
+    mem = (getattr(game, "obs_memory", None) or {}).get(pid) or {}
+    until = mem.get("bad_lines", {}).get((tuple(start), int(h)))
+    return until is not None and int(getattr(game, "clock", game.t)) < until
+
+
+def client_view(game: SplixGame, pid: int, store: dict) -> SplixGame:
+    """The game as a real client knows it: land as last seen (tiles on screen
+    are updated, off-screen ones keep what I saw last), other players and their
+    trails only while on screen, anyone's land from the minimap, and my true
+    tile count (the server reports it). ``store`` keeps the belief between steps."""
+    from .game import Player
+
+    n = game.size
+    me = game.players[pid]
+    belief = store.get("owner")
+    if belief is None or belief.shape != game.owner.shape:
+        belief = store["owner"] = np.full_like(game.owner, EMPTY)
+    r, c = me.pos
+    r0, r1, c0, c1 = max(0, r - VIEW), min(n, r + VIEW + 1), max(0, c - VIEW), min(n, c + VIEW + 1)
+    belief[r0:r1, c0:c1] = game.owner[r0:r1, c0:c1]
+    seen_t = store.get("seen_t")
+    if seen_t is None or seen_t.shape != game.owner.shape:
+        seen_t = store["seen_t"] = np.full(game.owner.shape, -10**9, dtype=np.int64)
+    clock = int(getattr(game, "clock", game.t))
+    seen_t[r0:r1, c0:c1] = clock
+    true_count = int(np.count_nonzero(game.owner == pid))
+    if BELIEF_STALE:
+        # I think I own more than the server says I do: some land I haven't seen
+        # lately is gone. Don't count on any of it until I see it again.
+        mine = belief == pid
+        land_now = game.owner != EMPTY  # what the minimap shows: land or not, never whose
+        snaps = store.setdefault("minimap", [])
+        if not snaps or clock - snaps[-1][0] >= 10:
+            snaps.append((clock, land_now.copy()))
+        while len(snaps) > 1 and clock - snaps[1][0] >= GROWTH_AGE:
+            snaps.pop(0)
+        if int(np.count_nonzero(mine)) - true_count >= ALARM_TILES:
+            stale = mine & (clock - seen_t > STALE_STEPS)
+            if STALE_NEAR_GROWTH and stale.any():
+                # a rat's loop usually takes some empty tiles with mine: new land on the
+                # minimap next to my border points at where my missing tiles went
+                from scipy.ndimage import binary_dilation
+
+                grown = land_now & ~snaps[0][1]
+                near = stale & binary_dilation(grown, iterations=10)
+                if near.any():
+                    stale = near
+            belief[stale] = UNKNOWN_OWNER
+    v = SplixGame.__new__(SplixGame)
+    v.__dict__.update({k: val for k, val in game.__dict__.items() if k not in ("owner", "trail", "players")})
+    v.owner = belief.copy()
+    v.trail = np.full_like(game.trail, EMPTY)
+    v.trail[game.trail == pid] = pid
+    players = []
+    for q in game.players:
+        if q.pid == pid:
+            players.append(q)
+            continue
+        seen = q.alive and max(abs(q.pos[0] - r), abs(q.pos[1] - c)) <= VIEW
+        if seen:
+            players.append(q)
+            v.trail[game.trail == q.pid] = q.pid  # the server sends a visible player's whole trail
+        else:
+            players.append(Player(pid=q.pid, pos=q.pos, heading=q.heading, alive=False))
+    v.players = players
+    v.land_hint = game.owner != EMPTY  # the minimap: anyone's land, not whose
+    v.land_count = true_count
+    v.obs_memory = store.setdefault("memory", {})
+    return v
+
+
 class OptionsActor:
     """Plays an options agent tile by tile, so evaluate / watch / live / frozen
     opponents can use it like any other actor."""
@@ -1207,6 +1329,10 @@ class OptionsActor:
         self.rng = np.random.default_rng(0)
         self.chosen: list[int] = []
         self.explain = False  # print one line per plan: what, how big, and why
+        # in simulation, plan from what a real client would know (see client_view);
+        # the live client builds that itself, so it turns this off
+        self.client_view = CLIENT_VIEW
+        self.view_store: dict = {}
 
     def _explain(self, game, pid, option):
         r = self.run
@@ -1225,14 +1351,36 @@ class OptionsActor:
               f"nearest known enemy {'none' if reach is None else reach} tiles, "
               f"on screen {len(_enemy_heads(game, pid))}", flush=True)
 
+    def _judge_last_line(self, game, pid):
+        """A line (dent or cut) that took far less than planned -- my picture of my
+        far land was stale, or someone was standing in the region -- goes on a
+        cooldown, so I don't keep retrying it."""
+        started = getattr(self, "line_started", None)
+        self.line_started = None
+        if started is None or not FAILED_LINE_MEMORY:
+            return
+        start, h, expected, count0 = started
+        got = _land_count(game, pid) - count0
+        if got < 0.3 * expected:
+            mem = game.obs_memory.setdefault(pid, {"seen": {}, "maps": []}) if getattr(game, "obs_memory", None) is not None else None
+            if mem is not None:
+                clock = int(getattr(game, "clock", game.t))
+                mem.setdefault("bad_lines", {})[(tuple(start), int(h))] = clock + FAILED_LINE_COOLDOWN
+                if self.explain:
+                    print(f"[plan] that line took {got} of the {expected} planned: not trying it again for {FAILED_LINE_COOLDOWN} steps", flush=True)
+
     def reset(self, env, seed: int) -> None:
         self.run = None
         self.rng = np.random.default_rng(seed)
+        self.view_store = {}
+        self.line_started = None
 
     def act(self, env, obs=None, pid: int = 0) -> int:
         from .obs import build_obs
 
         game = env.game
+        if self.client_view:
+            game = client_view(game, pid, self.view_store)
         if self.run is not None:
             a = self.run.act(game, pid)
             if a is not None:
@@ -1240,6 +1388,7 @@ class OptionsActor:
 
                 update_memory(game, pid, self.agent.obs_config)
                 return a
+        self._judge_last_line(game, pid)
         o = build_obs(game, pid, self.agent.obs_config)
         option = int(self.agent.act(o, deterministic=self.deterministic))
         self.chosen.append(option)
@@ -1247,6 +1396,8 @@ class OptionsActor:
         self.run = OptionRunner(option, self.rng, lag=lag, can_pause=getattr(env, "allow_pause", True),
                                 safety=self.safety, lag_slack=self.lag_slack)
         a = self.run.act(game, pid)
+        if self.run.kind == "cut" and self.run.cutting is not None:
+            self.line_started = (self.run.cutting[0], self.run.cutting[1], self.run.cutting[2], _land_count(game, pid))
         if self.explain:
             self._explain(game, pid, option)
         if a is None:

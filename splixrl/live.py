@@ -887,6 +887,8 @@ async def amain(args) -> None:
             window = LiveWindow(f"SplixRL live - {args.name}") if args.show and relay is None else None
             for life in range(args.lives):
                 actor = make_actor(args.actor, act_margin=args.act_margin)
+                if hasattr(actor, "client_view"):
+                    actor.client_view = False  # the live snapshot already is what the client knows
                 if args.explain and hasattr(actor, "explain"):
                     actor.explain = True
                 rows.append(await play_life(args.server, actor, args.name, colors[0], args.max_steps,
