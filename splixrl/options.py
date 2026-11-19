@@ -328,6 +328,7 @@ class OptionRunner:
         self.prey = None  # (key, trail cells) of an enemy whose race I'm winning
         self.cutting = None  # (start, h, gain, line cells, owner key) of a cut through enemy land
         self.alarmed = False  # went to look for land being taken out of view
+        self.notes: list[str] = []  # what happened during the plan, for --explain
         self.target = None
         self.patrol_kind = None
 
@@ -404,6 +405,7 @@ class OptionRunner:
             if game.is_safe(pid, a) and game.owner[game.next_cell(pid, a)[0]] == pid:
                 return a
         opts = safe_actions(game, pid)
+        self.notes.append("no safe move stays on my land: stepping out")
         return opts[0] if opts else STRAIGHT
 
     # -- main -------------------------------------------------------------------
@@ -437,10 +439,15 @@ class OptionRunner:
                             (p.trail and escape_margin(game, pid, prey_key) <= self.threshold)):
             if self.phase != "home":
                 self.aborted = True
+                why = ("out too long" if self.steps > MAX_OPTION_STEPS else
+                       f"an enemy could reach my trail first (margin {escape_margin(game, pid, prey_key):.0f} <= cushion {self.threshold:.1f})")
+                self.notes.append(f"turning back at trail {len(p.trail)}: {why}")
             return self._go_home(game, pid)
         if self.defend:
             invader = self._invasion(game, pid, at_home)
             if invader is not None:
+                if self.defended == 0:
+                    self.notes.append("defend reflex: going for an enemy trail on my land")
                 self.defended += 1
                 if not at_home:  # out on a plan: get home first, then cut it from my own land
                     return self._go_home(game, pid)
@@ -498,6 +505,7 @@ class OptionRunner:
         if at_home and self.idle_guard and self.kind in ("home", "ambush", "attack") and self.phase is None \
                 and self._nothing_to_wait_for(game, pid):
             # nothing to wait for or attack: expand instead of idling
+            self.notes.append(f"idle guard: {self.kind} -> open_loop (budget {self._budget(game, pid):.0f})")
             self.kind = "open_loop"
             self.idled_off = True
         return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
@@ -1396,6 +1404,19 @@ class OptionsActor:
                 if self.explain:
                     print(f"[plan] that line took {got} of the {expected} planned: not trying it again for {FAILED_LINE_COOLDOWN} steps", flush=True)
 
+    def _explain_progress(self, game, pid, kind0, finished):
+        r = self.run
+        p = game.players[pid]
+        self.trail_max = max(getattr(self, "trail_max", 0), len(p.trail))
+        if r.kind != kind0:
+            print(f"[plan]   -> now {r.kind}", flush=True)
+        for note in r.notes[getattr(self, "notes_shown", 0):]:
+            print(f"[plan]   {note}", flush=True)
+        self.notes_shown = len(r.notes)
+        if finished:
+            gained = _land_count(game, pid) - getattr(self, "land_at_start", _land_count(game, pid))
+            print(f"[plan]   done: longest trail {self.trail_max}, land {gained:+d}", flush=True)
+
     def reset(self, env, seed: int) -> None:
         self.run = None
         self.rng = np.random.default_rng(seed)
@@ -1409,7 +1430,10 @@ class OptionsActor:
         if self.client_view:
             game = client_view(game, pid, self.view_store)
         if self.run is not None:
+            kind0 = self.run.kind
             a = self.run.act(game, pid)
+            if self.explain:
+                self._explain_progress(game, pid, kind0, finished=a is None)
             if a is not None:
                 from .obs import update_memory
 
@@ -1422,11 +1446,15 @@ class OptionsActor:
         lag = float(getattr(game, "lag_estimate", 0.0))
         self.run = OptionRunner(option, self.rng, lag=lag, can_pause=getattr(env, "allow_pause", True),
                                 safety=self.safety, lag_slack=self.lag_slack)
+        self.trail_max, self.notes_shown, self.land_at_start = 0, 0, _land_count(game, pid)
         a = self.run.act(game, pid)
         if self.run.kind == "cut" and self.run.cutting is not None:
             self.line_started = (self.run.cutting[0], self.run.cutting[1], self.run.cutting[2], _land_count(game, pid))
         if self.explain:
             self._explain(game, pid, option)
+            for note in self.run.notes:
+                print(f"[plan]   {note}", flush=True)
+            self.notes_shown = len(self.run.notes)
         if a is None:
             a = STRAIGHT if game.is_safe(pid, STRAIGHT) else (safe_actions(game, pid) or [STRAIGHT])[0]
         return a
