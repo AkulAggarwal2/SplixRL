@@ -183,3 +183,20 @@ E is better in crowded games and worse on the sparse map, and survives less over
 * `BREAK_OUT`: if all my land is a hole in one enemy's land, their next loop anywhere takes all of it and kills me. A break-out reflex cuts a strip to the open. It only helps a little (swallowed 32 → 30 of 39 with a 4-tile ring): bots close a loop every few steps.
 * `LAND_ALARM` (tile count falls with nobody in view → walk toward my land out of view) cost land in testing (sparse return 352 → 294): off.
 * `LAND_ALARM`, second version (guided by what the minimap shows): when the tile count falls with nothing in view, walk over my land to border that other land has grown toward in the last 30 steps, else border other land touches, else my land out of view. At most one patrol per 60 steps (the first version started 135 patrols in 20 theft games, this one 13). Crowded: return 159.6 → 160.5, deaths 8 → 6 of 48. Sparse: 351.6 → 336.4, deaths 2 → 3 of 24. Both within noise. With strips on, invaders in the theft scenario no longer get any land (0 lost with or without it), so the simulator barely produces the out-of-view theft seen against people. It's on, because it's aimed at that case and costs nothing measurable.
+
+**Run F vs run C** (F = run C retrained for 100k decisions with all of the above rules, `human` bots, maps 32–96; same 72 fixed games as above, current rules for both):
+
+| | return crowded / sparse | deaths crowded / sparse | kills crowded / sparse | peak land crowded / sparse |
+|---|---|---|---|---|
+| **run C** | 160.5 / **336.4** | **6** / 3 | 21.0 / 6.2 | **696** / **2623** |
+| F at 100k | **165.9** / 328.8 | 8 / 3 | 21.8 / 6.1 | 651 / 2598 |
+| F best.pt | 151.5 / 318.0 | 12 / 4 | 18.6 / 6.4 | 643 / 2372 |
+
+Within noise of C, and slightly more deaths, so C stays `BEST_OPTIONS_AGENT.pt`. Three retrainings in a row (D, E, F) failed to beat C.
+
+## How to present the options agent in the report
+
+* **What is learned and what is scripted.** The learned part is the plan picker: Double DQN with SMDP updates (γ^k per plan), warm-started from the per-tile agent. Each plan is carried out by a hand-written controller, and shared hand-written rules apply to all of them: the safety cushion, defend reflex, early turns, race-checked attacks, strips and break-out. Most of the improvement after run C came from those rules, measured one at a time on fixed games, not from learning. Retraining the picker under the new rules (runs D, E, F) didn't measurably help.
+* **Why that's still a result.** The comparison that matters is per-tile vs options under the same fixed opponents: the options agent scored 3.4× the per-tile agent's return on the same 60 hard games (section 7). For an RL course the honest claim is that temporal abstraction (options) and engineered controllers made the problem learnable, and that learning then mostly chooses when to use which plan.
+* **"Find problems and fix them" (Misha).** Each fix in sections 3, 6 and 7 has a measured before/after on the same fixed games: turtling, the reward mismatch, kill farming, lag and wall hugging, fine-tuning erosion, the all-seeing stalker, last-tile turns, thin strips and jutting loops. That's the evidence he asked for. The frozen-opponent rounds should be reported as "X exploits frozen Y", not as a ranking.
+* **Caveats to state.** Evaluations are 24–60 games, so differences under about 10% of return or 2–3 deaths are noise. Results are against bots, and the `human` bot is an approximation of how people play.
