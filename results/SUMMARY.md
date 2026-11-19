@@ -224,3 +224,8 @@ Re-measured under the real rule (same fixed games, run C, current rules): crowde
 | **no strips into holes + cutting** | **600** | 599 |
 
 No deaths in any of these. Fixed games (no enclosed enemies there, so it rarely applies): crowded return 153.8 → 155.7, deaths 8 → 7; sparse unchanged. The owner here waits passively. A player who reacts would make cutting riskier; the race check is the guard, but it isn't tested against that.
+
+**Small captures with nobody near, and waiting.** In simulation, 1–2 tile captures with nobody on screen are about 1% of captures. Small captures happen almost only with enemies in view (refilling dents they bit, loops cut short), costing 3.2% of steps when crowded and 0.9% on the sparse map. Two live-only causes for what we see against people:
+* The live client's lag estimate goes up to 0.2, so the cushion reached 12 tiles, against at most 9 in training (lag 0–0.1) and 7.5 in every test. With anyone seen recently, every plan shrank to about 3 × 5 tiles. Now `LAG_CAP = 0.1`: the cushion never accounts for more lag than was trained and tested.
+* The idle guard (expand instead of waiting) only fired with nobody on screen, and on a busy server someone always is. It now goes by the safety budget: with room for a strip of 12 or more and no enemy trail in view, expand. Busy map (128×128, 10 opponents, 18 games): return 296.7 → 304.5, peak 2322 → 2413, deaths 3 → 3. A budget of 8 was too bold (6 deaths). Crowded and sparse fixed games: within noise.
+* `python -m splixrl.live ... --explain` prints one line per plan: what it chose, its size, the budget, the cushion and lag estimate, and the nearest known enemy.

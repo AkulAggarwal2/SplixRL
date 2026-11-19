@@ -137,6 +137,8 @@ MEMORY_SPEED = 0.5  # an unseen enemy is assumed to have closed in this many til
 # BUDGET_SHARE * (nearest enemy reach - cushion)), so they finish as rectangles
 # instead of being aborted halfway, which captured almost nothing.
 BUDGET_SHARE = 0.8
+IDLE_BUDGET = 12  # expand instead of waiting at home when a strip this big fits (None: only with nobody on screen)
+LAG_CAP = 0.1  # the most lag the safety cushion accounts for (training and tests used 0 - 0.1)
 # Unseen enemies are assumed to be at least this many tiles inside the edge of my view (lag, and the server's view is not exactly square).
 UNSEEN_MARGIN = 5
 # Don't start a loop the budget can't fit (it would be turned back at once).
@@ -273,7 +275,9 @@ class OptionRunner:
         self.option = option
         self.rng = rng
         self.can_pause = can_pause
-        self.threshold = safety + lag_slack * lag
+        # lag above LAG_CAP was never trained or tested: don't let a pessimistic
+        # estimate shrink every plan to a few tiles
+        self.threshold = safety + lag_slack * min(lag, LAG_CAP)
         self.steps = 0
         self.phase: str | None = None
         self.left_home = False
@@ -445,11 +449,25 @@ class OptionRunner:
             if plan is not None:
                 self.kind, self.strip = "strip", plan
         if at_home and self.idle_guard and self.kind in ("home", "ambush", "attack") and self.phase is None \
-                and not self._threat_near(game, pid):
+                and self._nothing_to_wait_for(game, pid):
             # nothing to wait for or attack: expand instead of idling
             self.kind = "open_loop"
             self.idled_off = True
         return getattr(self, "_opt_" + self.kind)(game, pid, at_home)
+
+    def _nothing_to_wait_for(self, game, pid) -> bool:
+        """Waiting only pays when an enemy could come within reach soon: with
+        room for a real strip (budget >= IDLE_BUDGET) and no enemy trail in
+        view to go for, expand instead. IDLE_BUDGET = None: wait whenever
+        anyone is on screen (the old rule)."""
+        if IDLE_BUDGET is None:
+            return not self._threat_near(game, pid)
+        enemy_trail = (game.trail != EMPTY) & (game.trail != pid)
+        if enemy_trail.any():
+            p = game.players[pid]
+            if int(np.abs(np.argwhere(enemy_trail) - np.array(p.pos)).sum(1).min()) <= VIEW:
+                return False
+        return self._budget(game, pid) >= IDLE_BUDGET
 
     def _threat_near(self, game, pid, radius: int = VIEW) -> bool:
         p = game.players[pid]
@@ -1045,6 +1063,24 @@ class OptionsActor:
         self.run: OptionRunner | None = None
         self.rng = np.random.default_rng(0)
         self.chosen: list[int] = []
+        self.explain = False  # print one line per plan: what, how big, and why
+
+    def _explain(self, game, pid, option):
+        r = self.run
+        p = game.players[pid]
+        reach = _enemy_reach(game, pid, np.array([p.pos], dtype=np.int64))
+        size = ""
+        if r.kind == "strip":
+            size = f" {r.strip[3]} long x {r.strip[4]} deep"
+        elif r.kind in ("loop", "open_loop", "safe_loop") and r.params:
+            size = f" {r.params[0]} out x {r.params[1]} along"
+        elif r.kind == "cut":
+            size = f" across {len(r.cutting[3])}, takes {r.cutting[2]}"
+        picked = OPTION_NAMES[option] if option < len(OPTION_NAMES) else option
+        print(f"[plan] {r.kind}{size} (picked {picked}) | budget {r._budget(game, pid):.0f} tiles, "
+              f"cushion {r.threshold:.1f} (lag {float(getattr(game, 'lag_estimate', 0.0)):.2f}), "
+              f"nearest known enemy {'none' if reach is None else reach} tiles, "
+              f"on screen {len(_enemy_heads(game, pid))}", flush=True)
 
     def reset(self, env, seed: int) -> None:
         self.run = None
@@ -1068,6 +1104,8 @@ class OptionsActor:
         self.run = OptionRunner(option, self.rng, lag=lag, can_pause=getattr(env, "allow_pause", True),
                                 safety=self.safety, lag_slack=self.lag_slack)
         a = self.run.act(game, pid)
+        if self.explain:
+            self._explain(game, pid, option)
         if a is None:
             a = STRAIGHT if game.is_safe(pid, STRAIGHT) else (safe_actions(game, pid) or [STRAIGHT])[0]
         return a
