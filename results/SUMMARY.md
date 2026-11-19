@@ -253,3 +253,14 @@ A raid takes a few dozen steps, and walking 70 tiles to it arrives after it's ov
 **Corner starts for strips** (`STRIP_USE_CORNERS`; spotted by Ahaan: out of an L-shaped corner it ran a leg down right beside its own arm). A strip may now start from either end, or, when its land borders the start side, from that land at the band's far edge, running along the open side and finishing into its land: two sides of trail instead of three. Steps with the trail out count 1.5× a step walking on its land (`STRIP_EXPOSURE_WEIGHT`). On the screenshot's shape: the same 160 tiles, longest trail 34 → 27. Fixed games (old → new): crowded 96 games on new seeds, return 145.6 → 141.5, deaths 17 → 15; sparse 372.0 → 369.7, deaths 3 → 2; busy 128×128, 314.4 → 369.7, deaths 2 → 2. Without the exposure weight, crowded deaths were 23, so it stays at 1.5.
 
 A stricter rule, the whole trail within the safety budget (`SAFE_STRIPS`; strips could keep their trail out about twice as long as the budget allows), made strips so small that it made more trips and died more (18 vs 11 of 90 deaths, return 709 vs 842): off.
+
+## Real-scale test (`python -m splixrl.benchmark`)
+
+The real arena is about 600×600 with 20–27 players (about 14,000 tiles each), and every earlier test was 10× more crowded than that. 600×600 runs at about 3 steps/s here, so the benchmark uses 300×300 with 12 opponents (about 7,000 tiles each), 3,000-step games (about 7–8 minutes of real play). Opponents are drawn per seat from a mix that includes players who take land: deep raiders (invader, 10 tiles deep from 40 away), line cutters, big loopers, human-like hunters, ordinary loopers. Same seeds for every actor. Run C agent, 20 games:
+
+| | survived | land at the end | peak land | median capture | kills |
+|---|---|---|---|---|---|
+| **current rules** | **100%** | **7,618** | **7,654** | **96** | 3.4 |
+| without strips, dent closing, cutting and the budget-based idle guard | 100% | 6,451 | 6,539 | 25 | 2.6 |
+
+No deaths at this density either way. The recent rules add 18% land, with captures about four times bigger. 7,618 tiles is 8.5% of the board, against a 7% fair share for 13 players. These are bots; people are more aggressive and adapt.
