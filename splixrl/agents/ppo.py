@@ -1,4 +1,4 @@
-"""PPO -- Sai's part. Only the interface is here.
+"""PPO
 
 What the rest of the project needs from this file:
 
@@ -107,7 +107,7 @@ class ActorCritic(nn.Module):
     
     def forward(self, grid: torch.Tensor, vec: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]: 
         h = self.body(torch.cat([self.conv(grid), vec], 1))
-        return self.policy(h), self.value(h).squeez(-1)
+        return self.policy(h), self.value(h).squeeze(-1)
 
 class PPOAgent(Agent):
     algo = "ppo"
@@ -145,8 +145,23 @@ class PPOAgent(Agent):
         grid, vec = obs_to_torch(obs, "cpu")
         logits, _ = self.net_cpu(grid, vec) 
         if deterministic: 
-            return int(logits.max(1).item())
+            return int(logits.argmax(1).item())
         return int(Categorical(logits=logits).sample().item())
+
+    @torch.no_grad()
+    def step_batch(self, obs:dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        "Training rollouts: sample actions for a batch, returns actions, log-probs, values"
+        grid, vec = obs_to_torch(obs, "cpu")
+        logits, value = self.net_cpu(grid, vec)
+        dist = Categorical(logits=logits)
+        a = dist.sample() 
+        return a.numpy(), dist.log_prob(a).numpy(), value.numpy()
+
+    @torch.no_grad()
+    def value_batch(self, obs:dict) -> np.ndarray:
+        "Critic's value estiamtes for a batch (bootstrapping)"
+        grid, vec = obs_to_torch(obs, "cpu")
+        return self.net_cpu(grid, vec)[1].numpy()
 
     # LEARNING
     def update(self, batch: dict[str, np.ndarray], lr: float) -> dict[str, float]:
@@ -164,7 +179,7 @@ class PPOAgent(Agent):
                 idx = perm[start:start + c.minibatch_size]
                 logits, value = self.net(t["grid"][idx], t["vec"][idx])
                 dist = Categorical(logits=logits)
-                log_ratio = dist.log_prob(t["actions"][idx] - t["logprobs"][idx])
+                log_ratio = dist.log_prob(t["actions"][idx]) - t["logprobs"][idx]
                 ratio = log_ratio.exp()
 
                 adv = t["advantages"][idx]
@@ -197,8 +212,8 @@ class PPOAgent(Agent):
                 stats["entropy"].append(entropy.item())
                 stats["approx_kl"].append(approx_kl)
                 stats["clipfrac"].append(clipfrac)
-                if c.target_kl > 0 and approx_kl > c.target_kl: 
-                    break
+            if c.target_kl > 0 and approx_kl > c.target_kl: 
+              break
         self.sync_actor()
         return {k: float(np.mean(v)) for k, v in stats.items()}
   
